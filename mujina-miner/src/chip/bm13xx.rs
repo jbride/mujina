@@ -59,7 +59,7 @@ impl CommandFieldBuilder {
     fn with_all_for_command(self, command: &Command) -> Self {
         self.with_all(
             match command {
-                Command::ReadRegister {all, ..} => &all,
+                Command::ReadRegister {all, ..} => all,
             }
         )
     }
@@ -85,7 +85,7 @@ impl CommandFieldBuilder {
     }
 
     fn build(self) -> u8 {
-        return self.field;
+        self.field
     }
 }
 
