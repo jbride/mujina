@@ -161,15 +161,15 @@ impl Encoder<Command> for FrameCodec {
 }
 
 pub enum Response {
-    RegisterValue { chip_address: u8, register: Register },
+    ReadRegister { chip_address: u8, register: Register },
     Nonce,
 }
 
 #[derive(FromRepr)]
 #[repr(u8)]
 enum ResponseType {
-    Command = 0,
-    Job = 4,
+    ReadRegister = 0,
+    Nonce = 4,
 }
 
 impl Response {
@@ -178,19 +178,19 @@ impl Response {
         let type_repr = type_and_crc[5..].load::<u8>();
 
         match ResponseType::from_repr(type_repr) {
-            Some(ResponseType::Command) => {
+            Some(ResponseType::ReadRegister) => {
                 let value: &[u8;4] = &bytes.split_to(4)[..].try_into().unwrap();
                 let chip_address = bytes.get_u8();
                 let register_address_repr = bytes.get_u8();
 
                 if let Some(register_address) = RegisterAddress::from_repr(register_address_repr) {
                     let register = Register::decode(register_address, value);
-                    Ok(Response::RegisterValue { chip_address, register })
+                    Ok(Response::ReadRegister { chip_address, register })
                 } else {
                     Err(format!("unknown register address 0x{:x}.", register_address_repr))
                 }
             },
-            Some(ResponseType::Job) => {
+            Some(ResponseType::Nonce) => {
                 panic!("not implemented")
             },
             None => {
@@ -306,22 +306,32 @@ mod response_tests {
     use super::*;
 
     #[test]
-    fn register_value() { 
+    fn read_register() {
         let wire = &[0xaa, 0x55, 0x13, 0x70, 0x00, 0x00, 0x00, 0x00, 0x06];
-        let response = decode_frame(wire);
-        
-        if let Some(Response::RegisterValue { chip_address, register }) = response {
-            assert_eq!(chip_address, 0);
-            if let Register::ChipAddress { chip_id, core_count, address } = register {
-                assert_eq!(chip_id, 0x1370);
-                assert_eq!(core_count, 0x00);
-                assert_eq!(address, 0x00);
-            } else {
-                panic!();
-            }
-        } else {
+        let response = decode_frame(wire).unwrap();
+
+        let Response::ReadRegister {
+            chip_address,
+            register,
+        } = response
+        else {
             panic!();
-        }
+        };
+
+        assert_eq!(chip_address, 0x00);
+
+        let Register::ChipAddress {
+            chip_id,
+            core_count,
+            address,
+        } = register
+        else {
+            panic!();
+        };
+
+        assert_eq!(chip_id, 0x1370);
+        assert_eq!(core_count, 0x00);
+        assert_eq!(address, 0x00);
     }
 
     fn decode_frame(frame: &[u8]) -> Option<Response> {
