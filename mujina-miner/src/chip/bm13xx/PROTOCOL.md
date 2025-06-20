@@ -5,6 +5,11 @@ family of Bitcoin mining ASICs. Since manufacturer documentation is not publicly
 available, this represents our best understanding based on analyzing open-source 
 implementations and reverse engineering efforts.
 
+**Note on Multi-Chip Chains**: Our initial implementation focuses on single-chip 
+configurations (e.g., Bitaxe). Details specific to multi-chip chains may be 
+incomplete or uncertain. We will refine this documentation as development 
+progresses and we gain experience with multi-chip systems.
+
 ## Sources
 
 - ESP-miner BM1370 implementation
@@ -236,8 +241,8 @@ The encoding allows ASICs to:
 - **Nonce**: 32-bit nonce value (little-endian)
   - Bits 31-25: Main core ID (7 bits, values 0-79)
   - Bits 24-0: Actual nonce value
-- **Midstate_Num**: Chip/core identifier (may encode chip ID in multi-chip 
-chains)
+- **Midstate_Num**: Chip/core identifier (uncertain - may encode chip ID in 
+multi-chip chains)
 - **Result_Header**: 8-bit field containing:
   - Bits 7-4: 4-bit job_id (0-15) 
   - Bits 3-0: 4-bit subcore_id (0-15)
@@ -379,10 +384,11 @@ Typical initialization flow for BM13xx chips:
    - Configure registers 0x10 and 0x28
    - Switch UART from 115200 to higher rate (e.g., 1000000)
 
-6. **Chip Addressing** (multi-chip chains)
+6. **Chip Addressing** (multi-chip chains - details uncertain)
    - Calculate address interval: `256 / chip_count`
    - Assign addresses: `chip_index * interval`
    - Set via register write commands
+   - *Exact mechanism may vary between implementations*
 
 ## Key Implementation Details
 
@@ -445,6 +451,7 @@ With register value 0x00001EB5 (7,861 decimal):
 
 Note: The ESP-miner source notes this register is "still a bit of a mystery" 
 and values are determined through empirical testing rather than documentation.
+Multi-chip configurations may require different values than those listed.
 
 #### Starting Nonce Field
 - Always set to 0x00000000 in practice
