@@ -1,11 +1,19 @@
 # BM13xx Protocol Documentation
 
-This document describes the BM13xx family ASIC protocol as implemented in this 
-codebase.
+This document describes the serial communication protocol used by the BM13xx 
+family of Bitcoin mining ASICs. Since manufacturer documentation is not publicly 
+available, this represents our best understanding based on analyzing open-source 
+implementations and reverse engineering efforts.
+
+## Sources
+
+- ESP-miner BM1370 implementation
+- CGMiner driver implementations
+- Emberone-miner BM1362/BM1368 implementation
 
 ## Overview
 
-The BM13xx family (BM1362, BM1366, BM1370, etc.) uses a frame-based 
+The BM13xx family (BM1362, BM1370, etc.) uses a frame-based 
 serial protocol for communication between the host and mining ASICs. The 
 protocol supports both command/response patterns and asynchronous nonce 
 reporting.
@@ -15,7 +23,6 @@ reporting.
 Different chips in the BM13xx family have varying core architectures:
 
 - **BM1362**: Core count unknown (used in Antminer S19 series)
-- **BM1366**: 112 main cores × 8 sub-cores = 896 total hashing units
 - **BM1370**: 80 main cores × 16 sub-cores = 1,280 total hashing units
 
 The core architecture affects how nonces are reported and job IDs are encoded.
@@ -62,83 +69,6 @@ rather than as an integer value
 - **Hash values** (merkle_root, prev_block_hash): These are byte arrays that 
 should be transmitted as-is without endianness conversion
 - **Single bytes**: No endianness applies (job_id, midstate_num, etc.)
-
-## Register Map
-
-Key registers used across BM13xx chips:
-
-| Register | Name | Description |
-|----------|------|-------------|
-| 0x00 | CHIP_ID | Chip identification and configuration |
-| 0x08 | PLL_DIVIDER | Frequency control registers for hash clock |
-| 0x10 | NONCE_RANGE | Controls nonce search range per core |
-| 0x14 | TICKET_MASK | Difficulty mask for share submission |
-| 0x18 | MISC_CONTROL | UART settings and miscellaneous control |
-| 0x28 | UART_BAUD | UART baud rate configuration |
-| 0x3C | CORE_REGISTER | Core configuration and control |
-| 0x54 | ANALOG_MUX | Analog mux control (rumored to control temp diode) |
-| 0x58 | UNKNOWN_CTRL | Unknown control register (value 0x11110100) |
-| 0xA4 | VERSION_MASK | Version rolling mask configuration |
-| 0xA8 | UNKNOWN_INIT | Initialization register (value 0x07000007) |
-| 0xB9 | MISC_SETTINGS | Miscellaneous settings (BM1370 only, value 
-0x00004480) |
-
-### Register Details
-
-#### 0x00 - CHIP_ID
-Contains chip identification and configuration (4 bytes):
-- **Byte 0-1**: Chip type identifier
-  - BM1370: `[0x13, 0x70]`
-  - BM1366: `[0x13, 0x66]`
-  - BM1362: `[0x13, 0x62]` (presumed)
-- **Byte 2**: Core count or configuration
-- **Byte 3**: Chip address (assigned)
-
-Note: The chip type identifier should be treated as a byte sequence rather than
-interpreted as an integer value to avoid endianness confusion.
-
-#### 0x08 - PLL_DIVIDER (Frequency Control)
-Controls the hash frequency through PLL configuration:
-- Byte 0: VCO range (0x50 or 0x40)
-- Byte 1: FB_DIV (feedback divider)
-- Byte 2: REF_DIV (reference divider)
-- Byte 3: POST_DIV flags (bit 1 = fixed to 1)
-
-#### 0x10 - NONCE_RANGE
-Controls nonce search space distribution (format not fully documented):
-- Affects how chips divide the 32-bit nonce space
-- Different values used for different chip counts
-- Mechanism remains partially understood through empirical testing
-
-#### 0x14 - TICKET_MASK (Difficulty)
-Sets the difficulty mask (4 bytes, little-endian):
-- Each byte is bit-reversed
-- Example: difficulty 256 = 0xFF000000 → transmitted as [0xFF, 0x00, 0x00, 
-0x00]
-
-#### 0x3C - CORE_REGISTER
-Requires multiple writes during initialization:
-1. Write 0x80008B00
-2. Write 0x80008C00  
-3. Write 0x800082AA (per chip configuration)
-
-#### 0x54 - ANALOG_MUX
-Controls analog multiplexer, possibly for temperature sensing:
-- BM1370: Write value 0x00000002
-- BM1366/BM1368: Write value 0x00000003
-- Purpose not fully documented by manufacturer
-
-#### 0xA4 - VERSION_MASK
-Controls which bits of the version field can be rolled:
-- Lower 16 bits typically enabled for rolling
-- Set via Stratum configuration (e.g., 0x1FFFE000)
-
-#### 0xB9 - MISC_SETTINGS (BM1370 only)
-Undocumented miscellaneous settings register:
-- Value: 0x00004480
-- Written twice during BM1370 initialization
-- Not used in other BM13xx variants
-- Purpose unknown
 
 ## Command Types
 
@@ -187,10 +117,10 @@ register 0xA4)
 BM13xx chips support two job formats, determined by the chip model and version 
 rolling requirements:
 
-1. **Full Format**: Used by BM1362/BM1366/BM1370 - ASIC calculates midstates
+1. **Full Format**: Used by BM1362/BM1370 - ASIC calculates midstates
 2. **Midstate Format**: Used by BM1397 and others - Host pre-calculates midstates
 
-#### Full Format (BM1362/BM1366/BM1370)
+#### Full Format (BM1362/BM1370)
 The ASIC calculates SHA256 midstates internally from the provided block header 
 components. This format is used by the chips mujina-miner supports.
 
@@ -253,7 +183,7 @@ midstates for version rolling. In this format:
 - Enables more efficient version rolling on the ASIC
 - Total packet size varies based on number of midstates
 
-Since BM1362/BM1366/BM1370 calculate midstates internally, mujina-miner uses 
+Since BM1362/BM1370 calculate midstates internally, mujina-miner uses 
 the full format exclusively. Version rolling is controlled by register 0xA4 
 (VERSION_MASK), not by the `num_midstates` field.
 
@@ -314,21 +244,16 @@ chains)
 - **Version**: 16-bit version bits (little-endian)
   - When version rolling enabled: Contains rolled bits to be shifted left 13 
 positions
-  - When version rolling disabled: Typically 0x0000
 
 Example BM1370 response: `AA 55 18 00 A6 40 02 99 22 F9 91`
 - Nonce: 0x40A60018 → Main core 12, nonce value 0x00A60018
 - Result_Header: 0x99 → job_id=9 (bits 7-4), subcore_id=9 (bits 3-0)
 - Version: 0xF922 → Version bits 0x045F2000 (after shifting)
 
-#### BM1366 (112 cores × 8 sub-cores = 896 units):
-- **Result_Header** encoding:
-  - job_id: `result_header & 0xF8` (upper 5 bits)
-  - subcore_id: `result_header & 0x07` (lower 3 bits, values 0-7)
 
 #### BM1362:
 - Similar 11-byte response format
-- Job ID encoding likely follows BM1366/BM1368 pattern
+- Job ID encoding likely follows BM1368 pattern
 - Midstate_Num may encode chip ID in multi-chip configurations
 
 
@@ -345,6 +270,82 @@ Some nonce responses carry special meanings:
 #### Zero Nonces
 - Nonce value 0x00000000 can be valid for non-mining responses
 - Always check job_id to determine response type
+
+## Register Map
+
+Key registers used across BM13xx chips:
+
+| Register | Name | Description |
+|----------|------|-------------|
+| 0x00 | CHIP_ID | Chip identification and configuration |
+| 0x08 | PLL_DIVIDER | Frequency control registers for hash clock |
+| 0x10 | NONCE_RANGE | Controls nonce search range per core |
+| 0x14 | TICKET_MASK | Difficulty mask for share submission |
+| 0x18 | MISC_CONTROL | UART settings and miscellaneous control |
+| 0x28 | UART_BAUD | UART baud rate configuration |
+| 0x3C | CORE_REGISTER | Core configuration and control |
+| 0x54 | ANALOG_MUX | Analog mux control (rumored to control temp diode) |
+| 0x58 | UNKNOWN_CTRL | Unknown control register (value 0x11110100) |
+| 0xA4 | VERSION_MASK | Version rolling mask configuration |
+| 0xA8 | UNKNOWN_INIT | Initialization register (value 0x07000007) |
+| 0xB9 | MISC_SETTINGS | Miscellaneous settings (BM1370 only, value 
+0x00004480) |
+
+### Register Details
+
+#### 0x00 - CHIP_ID
+Contains chip identification and configuration (4 bytes):
+- **Byte 0-1**: Chip type identifier
+  - BM1370: `[0x13, 0x70]`
+  - BM1362: `[0x13, 0x62]` (presumed)
+- **Byte 2**: Core count or configuration
+- **Byte 3**: Chip address (assigned)
+
+Note: The chip type identifier should be treated as a byte sequence rather than
+interpreted as an integer value to avoid endianness confusion.
+
+#### 0x08 - PLL_DIVIDER (Frequency Control)
+Controls the hash frequency through PLL configuration:
+- Byte 0: VCO range (0x50 or 0x40)
+- Byte 1: FB_DIV (feedback divider)
+- Byte 2: REF_DIV (reference divider)
+- Byte 3: POST_DIV flags (bit 1 = fixed to 1)
+
+#### 0x10 - NONCE_RANGE
+Controls nonce search space distribution (format not fully documented):
+- Affects how chips divide the 32-bit nonce space
+- Different values used for different chip counts
+- Mechanism remains partially understood through empirical testing
+
+#### 0x14 - TICKET_MASK (Difficulty)
+Sets the difficulty mask (4 bytes, little-endian):
+- Each byte is bit-reversed
+- Example: difficulty 256 = 0xFF000000 → transmitted as [0xFF, 0x00, 0x00, 
+0x00]
+
+#### 0x3C - CORE_REGISTER
+Requires multiple writes during initialization:
+1. Write 0x80008B00
+2. Write 0x80008C00  
+3. Write 0x800082AA (per chip configuration)
+
+#### 0x54 - ANALOG_MUX
+Controls analog multiplexer, possibly for temperature sensing:
+- BM1370: Write value 0x00000002
+- BM1368: Write value 0x00000003
+- Purpose not fully documented by manufacturer
+
+#### 0xA4 - VERSION_MASK
+Controls which bits of the version field can be rolled:
+- Lower 16 bits typically enabled for rolling
+- Set via Stratum configuration (e.g., 0x1FFFE000)
+
+#### 0xB9 - MISC_SETTINGS (BM1370 only)
+Undocumented miscellaneous settings register:
+- Value: 0x00004480
+- Written twice during BM1370 initialization
+- Not used in other BM13xx variants
+- Purpose unknown
 
 ## Initialization Sequence
 
@@ -445,17 +446,6 @@ With register value 0x00001EB5 (7,861 decimal):
 Note: The ESP-miner source notes this register is "still a bit of a mystery" 
 and values are determined through empirical testing rather than documentation.
 
-#### Version Rolling Impact
-- When enabled, each job can include multiple midstates (1, 2, or 4)
-- Each midstate represents a different block version
-- Effectively multiplies the search space by the number of midstates
-- Version bits can be further modified by the ASIC (bits specified by version 
-mask)
-- **Important**: Each chip maintains its nonce range across all versions
-  - Chip 0 always searches nonces with its address pattern
-  - Version changes don't affect nonce partitioning
-  - This ensures no duplicate work across chips
-
 #### Starting Nonce Field
 - Always set to 0x00000000 in practice
 - Hardware automatically offsets based on chip/core addressing
@@ -472,8 +462,6 @@ Consider a 4-chip BM1370 chain mining a block:
    - Chip 3: Searches nonces where certain bits = 0xC0
 4. **Total parallel operations**: 4 chips × 1,280 cores = 5,120 simultaneous 
 searches
-5. **With 4x version rolling**: 5,120 × 4 = 20,480 different hash attempts 
-per cycle
 
 #### Multiple Hash Board Distribution
 When a mining system has multiple hash boards, the software MUST prevent 
@@ -486,25 +474,19 @@ duplicate work:
    - Board 2: ntime + 2
    - This ensures each board searches a unique block variation
 
-2. **Midstate-Based Distribution**:
-   - Different midstates (version variations) sent to each board
-   - Board 0: midstates 0-3
-   - Board 1: midstates 4-7
-   - Requires version rolling support
-
-3. **Work Registry**:
+2. **Work Registry**:
    - Software maintains a registry tracking which work is on which board
    - Each work assignment has a unique ID
    - Nonce responses are matched back to the correct work/board
 
-4. **Example**: Antminer S19 with 3 hash boards
+3. **Example**: Antminer S19 with 3 hash boards
    - Board 0: Works on block with ntime=X
    - Board 1: Works on block with ntime=X+1
    - Board 2: Works on block with ntime=X+2
    - Total: 3 boards × 76 chips × ~100 cores = ~23,000 parallel searches
    - Each searching a DIFFERENT block variation
 
-5. **No Wasted Work**:
+4. **No Wasted Work**:
    - Every hash calculation is unique across all boards
    - Software actively manages work distribution
    - Hardware (chips/cores) handle nonce space division within each board
@@ -512,8 +494,8 @@ duplicate work:
 ### Job ID Management
 
 #### Purpose of Job IDs
-Job IDs are critical for mining operation even though all chips receive the 
-same work:
+Job IDs are critical for mining operation even though work is broadcast to all
+chips.
 
 1. **Asynchronous Nonce Returns**: Chips find and return nonces at 
 unpredictable times
@@ -527,7 +509,6 @@ block template it belongs to
 4. **Critical for Block Changes**: When a new block is found on the network:
    - Old work becomes invalid immediately
    - Nonces for old jobs must be discarded
-   - Without job IDs, stale nonces would be submitted (and rejected)
 
 #### Example Timeline
 ```
@@ -537,27 +518,6 @@ Time 90ms:   NEW BLOCK! Send Job 0x30 (mining block height 850,001)
 Time 95ms:   Receive nonce with Job ID 0x00 → Discard (old block)
 Time 100ms:  Receive nonce with Job ID 0x30 → Valid for current block
 ```
-
-#### Job ID Encoding
-
-The job_header and result_header fields encode different information:
-
-**job_header (in job commands, 8-bit field):**
-- Bits 7: Always 0
-- Bits 6-3: 4-bit job_id (values 0-15)
-- Bits 2-0: Always 0
-
-**result_header (in nonce responses, 8-bit field):**
-- Bits 7-4: 4-bit job_id (same value, shifted left by 1)
-- Bits 3-0: 4-bit subcore_id (added by hardware)
-
-**BM1366 Implementation:**
-- Uses a different bit positioning scheme
-- job_header encoding: `(job_id << 3) | 0x08`
-- Extracts job_id from result_header upper 5 bits: `result_header >> 3`
-
-The hardware automatically inserts the subcore_id into the lower bits of the 
-result_header when returning nonces.
 
 ### CRC Calculation
 - **CRC5**: Used for command/response frames
@@ -577,7 +537,7 @@ nonce range by modifying the block version field.
 #### How Version Rolling Works
 
 1. **Search Order**: The ASIC searches in this sequence:
-   - First: All nonces (0x00000000 to 0xFFFFFFFF) with current version
+   - First: All nonces in the chip's range, using current version
    - Then: Increment version and search all nonces again
    - Continues until all allowed version values are exhausted
 
@@ -600,9 +560,7 @@ nonce range by modifying the block version field.
 
 5. **Job Exhaustion**:
    - No explicit "work complete" signal from the ASIC
-   - The chip simply stops producing nonces for that job_id
    - Mining software must send new jobs before exhaustion
-   - Typical job updates every 30-60 seconds prevent exhaustion
 
 #### Version Rolling in Multi-Chip Chains
 
@@ -615,14 +573,6 @@ space partitioning:
    - Searches the same nonce range again with new version
    - The chip address ensures no overlap between chips
 
-2. **Example with 4-chip chain**:
-   - All chips receive the same job with `num_midstates = 4`
-   - Chip 0 (addr 0x00): Searches nonces 0x00______, 0x01______, etc.
-   - Chip 1 (addr 0x40): Searches nonces 0x40______, 0x41______, etc.
-   - When Chip 0 exhausts its ~1B nonces, it increments version
-   - Chip 0 then searches 0x00______, 0x01______ again with new version
-   - Each chip independently manages its version rolling
-
 3. **No Duplication**:
    - Chip address bits embedded in nonce ensure unique ranges
    - Version rolling multiplies each chip's search space equally
@@ -632,7 +582,7 @@ space partitioning:
 4. **Timing Considerations**:
    - All chips roll versions at different times
    - Faster chips may reach version 2 while others still on version 1
-   - This is fine - no coordination needed between chips
+   - This is fine---no coordination needed between chips
    - Each chip's nonce+version combination remains unique
 
 ### Chip Summary
@@ -640,11 +590,5 @@ space partitioning:
 | Chip | Chip ID | Cores | Sub-cores | Job ID Bits | Used In |
 |------|---------|-------|-----------|-------------|----------|
 | BM1362 | 0x1362? | Unknown | Unknown | Unknown | Antminer S19 |
-| BM1366 | 0x1366 | 112 | 8 | 5+3 | Various |
 | BM1370 | 0x1370 | 80 | 16 | 4+4 | Bitaxe Gamma |
 
-## References
-- ESP-miner BM1370 implementation (`../esp-miner/components/asic/bm1370.c`)
-- CGMiner driver implementations (`../cgminer/driver-*.c`)
-- Emberone-miner BM1362/BM1366 implementation (`../emberone-miner/piaxe/`)
-- AsicBoost whitepaper: https://arxiv.org/pdf/1604.00575.pdf
