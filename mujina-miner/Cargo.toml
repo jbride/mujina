@@ -9,11 +9,14 @@ repository = "https://github.com/256-Foundation/Mujina-Mining-Firmware"
 
 [dependencies]
 async-trait = { workspace = true }
+bitcoin = "0.32.6"
 bitvec = { workspace = true }
 bytes = { workspace = true }
 crc_all = { workspace = true }
 futures = { workspace = true }
+hex = "0.4.3"
 modular-bitfield = { workspace = true }
+sha2 = "0.10.9"
 strum = { workspace = true }
 thiserror = "2.0.12"
 time = { workspace = true }
