@@ -54,7 +54,7 @@ impl BitaxeBoard {
             control,
             data_writer: FramedWrite::new(writer, bm13xx::FrameCodec::default()),
             data_reader: Some(FramedRead::new(reader, bm13xx::FrameCodec::default())),
-            protocol: BM13xxProtocol::new(false), // TODO: Make version rolling configurable
+            protocol: BM13xxProtocol::new(),
             chip_infos: Vec::new(),
             event_tx: None,
             current_job_id: None,
@@ -307,6 +307,18 @@ impl Board for BitaxeBoard {
     async fn initialize(&mut self) -> Result<tokio::sync::mpsc::Receiver<BoardEvent>, BoardError> {
         // Reset the board first
         self.reset().await?;
+        
+        // Enable version rolling before chip discovery (as seen in serial captures)
+        // Write 0xFFFF0090 to register 0xA4 to enable version rolling
+        let version_cmd = Command::WriteRegister {
+            all: true,  // Broadcast to all chips
+            chip_address: 0x00,
+            register: bm13xx::protocol::Register::VersionMask(bm13xx::protocol::VersionMask::full_rolling()),
+        };
+        self.send_config_command(version_cmd).await?;
+        
+        // Small delay after version rolling configuration
+        tokio::time::sleep(Duration::from_millis(10)).await;
         
         // Discover connected chips
         self.discover_chips().await?;

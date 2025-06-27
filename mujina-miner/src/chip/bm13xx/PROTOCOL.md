@@ -217,16 +217,17 @@ the full format exclusively. Version rolling is controlled by register 0xA4
 ### Read Register Response (TYPE=0)
 **Format (11 bytes total):**
 ```
-| 0xAA 0x55 | Register_Value[4] | Chip_Addr | Reg_Addr | Unknown[2] | 
-CRC5+Type |
+| 0xAA 0x55 | Register_Value[4] | Chip_Addr | Reg_Addr | Unknown[2] | CRC5+Type |
 ```
+
+All register read responses from the BM13xx chips we support use this fixed 11-byte 
+format, regardless of chip model or configuration settings.
 
 - **Register_Value**: 4-byte value read from the register
 - **Chip_Addr**: Address of the responding chip
 - **Reg_Addr**: Address of the register that was read
 - **Unknown**: 2 bytes of unknown purpose
-- **CRC5+Type**: Last byte with CRC5 in bits 0-4 and response type (0) in bits 
-5-7
+- **CRC5+Type**: Last byte with CRC5 in bits 0-4 and response type (0) in bits 5-7
 
 Example response for reading register 0x00 (CHIP_ID):
 - Command: `55 AA 52 05 00 00 0A`
@@ -244,9 +245,15 @@ bytes is not documented.
 
 **Format (11 bytes total):**
 ```
-| 0xAA 0x55 | Nonce[4] | Midstate_Num | Result_Header | Version[2] | CRC5+Type 
-|
+| 0xAA 0x55 | Nonce[4] | Midstate_Num | Result_Header | Version[2] | CRC5+Type |
 ```
+
+**Response Length Note:**
+The BM13xx family chips we support (BM1362, BM1366, BM1368, BM1370) all use 11-byte 
+nonce responses that include a 2-byte version field. This is confirmed by all captured 
+serial data. Documentation suggests the BM1397 (also in the BM13xx family) uses 9-byte 
+responses without the version field, but we choose not to support the BM1397 in this 
+implementation.
 
 **Purpose of Core and Job ID Encoding:**
 The encoding allows ASICs to:

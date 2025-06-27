@@ -221,7 +221,7 @@ async fn configure_chips_for_mining(board: &mut BitaxeBoard) -> Result<(), Board
     info!("Detected chip type: {:?}", chip_type);
     
     // Create protocol handler
-    let protocol = BM13xxProtocol::new(true); // Enable version rolling
+    let protocol = BM13xxProtocol::new();
     
     // Get initialization commands for single chip (Bitaxe has one chip)
     let init_freq = Frequency::from_mhz(INITIAL_FREQUENCY_MHZ)

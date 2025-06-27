@@ -781,7 +781,7 @@ pub enum Response {
 }
 
 impl Response {
-    fn decode(bytes: &mut BytesMut, _is_version_rolling: bool) -> Result<Response, ProtocolError> {
+    fn decode(bytes: &mut BytesMut) -> Result<Response, ProtocolError> {
         let type_and_crc = bytes[bytes.len() - 1].view_bits::<Lsb0>();
         let type_repr = type_and_crc[5..].load::<u8>();
 
@@ -831,11 +831,7 @@ impl Response {
 }
 
 #[derive(Default)]
-pub struct FrameCodec {
-    // Controls whether to use the alternative frame format required when version rolling
-    // is enabled. When true, uses version rolling compatible format. (default: false)
-    version_rolling: bool,
-}
+pub struct FrameCodec {}
 
 impl Encoder<Command> for FrameCodec {
     type Error = io::Error;
@@ -892,52 +888,58 @@ impl Decoder for FrameCodec {
         // returning Ok(None). In the case of a valid frame, consume that frame's worth of bytes.
 
         const PREAMBLE: [u8; 2] = [0xaa, 0x55];
-        const NONROLLING_FRAME_LEN: usize = PREAMBLE.len() + 7;
-        const ROLLING_FRAME_LEN: usize = PREAMBLE.len() + 9;
+        // All BM13xx responses are 11 bytes (2 preamble + 9 data)
+        const FRAME_LEN: usize = PREAMBLE.len() + 9;
         const CALL_AGAIN: Result<Option<Response>, io::Error> = Ok(None);
 
-        let frame_len = if self.version_rolling {
-            ROLLING_FRAME_LEN
-        } else {
-            NONROLLING_FRAME_LEN
-        };
-
-        if src.len() < frame_len {
+        if src.len() < FRAME_LEN {
             return CALL_AGAIN;
         }
 
-        let mut prospect = src.clone(); // avoid consuming real buffer as we provisionally parse
-
-        if prospect.get_u8() != PREAMBLE[0] {
+        // Check preamble without consuming the buffer
+        if src[0] != PREAMBLE[0] {
             src.advance(1);
             return CALL_AGAIN;
         }
 
-        if prospect.get_u8() != PREAMBLE[1] {
+        if src[1] != PREAMBLE[1] {
             src.advance(1);
             return CALL_AGAIN;
         }
 
-        if !crc5_is_valid(&prospect[..]) {
+        // Validate CRC5 over the entire frame (excluding preamble)
+        // CRC5 is computed over the 9 data bytes after the preamble
+        if !crc5_is_valid(&src[2..FRAME_LEN]) {
             src.advance(1);
             return CALL_AGAIN;
-        } else {
-            src.advance(frame_len);
         }
 
-        match Response::decode(&mut prospect, self.version_rolling) {
+        // We have a valid frame with correct CRC
+        // Save the frame bytes before consuming
+        let frame_bytes = src[..FRAME_LEN].to_vec();
+        
+        // Create a buffer for decoding
+        let mut decode_buf = BytesMut::from(&src[..FRAME_LEN]);
+        decode_buf.advance(2); // Skip preamble for Response::decode
+        
+        match Response::decode(&mut decode_buf) {
             Ok(response) => {
+                // Only advance if decode was successful
+                src.advance(FRAME_LEN);
+                
                 // Log the received frame for debugging
                 trace!(
                     "RX: {:?} ({} bytes) => {:02x?}",
                     response,
-                    frame_len,
-                    &src[..frame_len]
+                    FRAME_LEN,
+                    frame_bytes
                 );
                 Ok(Some(response))
             },
             Err(err) => {
                 warn!("Failed to decode response: {}", err);
+                // Advance by 1 to try to find next valid frame
+                src.advance(1);
                 CALL_AGAIN
             }
         }
@@ -950,7 +952,7 @@ mod init_tests {
     
     #[test]
     fn multi_chip_init_sequence() {
-        let protocol = BM13xxProtocol::new(true);
+        let protocol = BM13xxProtocol::new();
         let commands = protocol.multi_chip_init(65); // S21 Pro has 65 chips
         
         // Verify the sequence starts with version rolling enable
@@ -995,7 +997,7 @@ mod init_tests {
     
     #[test]
     fn domain_configuration() {
-        let protocol = BM13xxProtocol::new(false);
+        let protocol = BM13xxProtocol::new();
         let commands = protocol.configure_domains(65, 5); // 65 chips, 5 per domain
         
         // Should have 13 domains
@@ -1019,7 +1021,7 @@ mod init_tests {
     
     #[test]
     fn frequency_ramp_sequence() {
-        let protocol = BM13xxProtocol::new(false);
+        let protocol = BM13xxProtocol::new();
         let start = Frequency::from_mhz(400.0).unwrap();
         let target = Frequency::from_mhz(600.0).unwrap();
         let commands = protocol.frequency_ramp(start, target, 5);
@@ -1096,7 +1098,7 @@ mod init_tests {
     
     #[test]
     fn nonce_range_configuration() {
-        let protocol = BM13xxProtocol::new(false);
+        let protocol = BM13xxProtocol::new();
         
         // Test single chip - full range
         let commands = protocol.configure_nonce_ranges(1);
@@ -1136,7 +1138,7 @@ mod init_tests {
     fn job_distribution() {
         use crate::chip::MiningJob;
         
-        let protocol = BM13xxProtocol::new(true);
+        let protocol = BM13xxProtocol::new();
         
         // Create a test header
         let mut header = [0u8; 80];
@@ -1170,7 +1172,7 @@ mod init_tests {
     
     #[test]
     fn multi_chip_init_includes_nonce_range() {
-        let protocol = BM13xxProtocol::new(true);
+        let protocol = BM13xxProtocol::new();
         let commands = protocol.multi_chip_init(65);
         
         // Find the nonce range configuration
@@ -1389,10 +1391,31 @@ mod command_tests {
 #[cfg(test)]
 mod response_tests {
     use super::*;
+    use bytes::BufMut;
 
+    #[test] 
+    fn verify_crc_calculation() {
+        // Test that our known good frame has valid CRC
+        let frame = &[0x13, 0x70, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10]; // without preamble
+        assert!(crc5_is_valid(frame), "Known good frame should have valid CRC");
+    }
+    
+    #[test]
+    fn decoder_with_exact_frame_size() {
+        let mut codec = FrameCodec::default();
+        
+        // Exactly 11 bytes - a complete frame
+        let mut buf = BytesMut::new();
+        buf.put_slice(&[0xaa, 0x55, 0x13, 0x70, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10]);
+        
+        let result = codec.decode(&mut buf).unwrap();
+        assert!(result.is_some(), "Should decode frame when buffer has exactly 11 bytes");
+    }
+    
     #[test]
     fn read_register() {
-        let wire = &[0xaa, 0x55, 0x13, 0x70, 0x00, 0x00, 0x00, 0x00, 0x06];
+        // 11-byte register read response from captures
+        let wire = &[0xaa, 0x55, 0x13, 0x70, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10];
         let response = decode_frame(wire)
             .expect("decode_frame should return Some for valid frame");
 
@@ -1495,6 +1518,205 @@ mod response_tests {
             assert_eq!(version, exp_version);
         }
     }
+    
+    #[test]
+    fn decoder_handles_partial_frames() {
+        let mut codec = FrameCodec::default();
+        
+        // Test with incomplete frame (less than 11 bytes)
+        let mut buf = BytesMut::new();
+        buf.put_slice(&[0xaa, 0x55, 0x13, 0x70, 0x00]); // Only 5 bytes
+        
+        let result = codec.decode(&mut buf).unwrap();
+        assert!(result.is_none(), "Should return None for incomplete frame");
+        assert_eq!(buf.len(), 5, "Buffer should not be consumed");
+        
+        // Add more bytes to complete the frame
+        buf.put_slice(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x10]); // Complete to 11 bytes
+        
+        let result = codec.decode(&mut buf).unwrap();
+        assert!(result.is_some(), "Should decode complete frame");
+        assert_eq!(buf.len(), 0, "Buffer should be fully consumed");
+    }
+    
+    #[test]
+    fn decoder_handles_corrupted_crc() {
+        let mut codec = FrameCodec::default();
+        
+        // Valid frame with corrupted CRC (last byte)
+        let mut buf = BytesMut::new();
+        buf.put_slice(&[0xaa, 0x55, 0x13, 0x70, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF]); // Bad CRC
+        
+        let result = codec.decode(&mut buf).unwrap();
+        assert!(result.is_none(), "Should reject frame with bad CRC");
+        assert_eq!(buf.len(), 10, "Should consume 1 byte when searching for valid frame");
+    }
+    
+    #[test]
+    fn decoder_finds_frame_after_garbage() {
+        let mut codec = FrameCodec::default();
+        
+        // Garbage bytes followed by valid frame
+        let mut buf = BytesMut::new();
+        buf.put_slice(&[0xFF, 0xEE, 0xDD]); // Garbage
+        buf.put_slice(&[0xaa, 0x55, 0x13, 0x70, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10]); // Valid frame
+        
+        // First calls should skip garbage
+        assert!(codec.decode(&mut buf).unwrap().is_none());
+        assert!(codec.decode(&mut buf).unwrap().is_none());
+        assert!(codec.decode(&mut buf).unwrap().is_none());
+        
+        // Should find valid frame
+        let result = codec.decode(&mut buf).unwrap();
+        assert!(result.is_some(), "Should find valid frame after garbage");
+        assert_eq!(buf.len(), 0, "All data should be consumed");
+    }
+    
+    #[test]
+    fn decoder_handles_false_start() {
+        let mut codec = FrameCodec::default();
+        
+        // Frame that starts with 0xAA but not followed by 0x55
+        let mut buf = BytesMut::new();
+        buf.put_slice(&[0xaa, 0x00]); // False start
+        buf.put_slice(&[0xaa, 0x55, 0x13, 0x70, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10]); // Valid frame
+        
+        // Total buffer: [AA, 00, AA, 55, 13, 70, 00, 00, 00, 00, 00, 00, 10] = 13 bytes
+        assert_eq!(buf.len(), 13, "Initial buffer should have 13 bytes");
+        
+        // First decode: sees AA at pos 0, but 00 at pos 1, so should skip 1 byte
+        let first = codec.decode(&mut buf).unwrap();
+        assert!(first.is_none(), "First decode should return None");
+        assert_eq!(buf.len(), 12, "Should have consumed 1 byte");
+        
+        // Buffer now: [00, AA, 55, 13, 70, 00, 00, 00, 00, 00, 00, 10] = 12 bytes
+        // Second decode: sees 00 at pos 0, should skip 1 byte
+        let second = codec.decode(&mut buf).unwrap();
+        assert!(second.is_none(), "Second decode should return None");
+        assert_eq!(buf.len(), 11, "Should have consumed another byte");
+        
+        // Buffer now: [AA, 55, 13, 70, 00, 00, 00, 00, 00, 00, 10] = 11 bytes = valid frame
+        // Third decode should succeed
+        let result = codec.decode(&mut buf);
+        match result {
+            Ok(Some(Response::ReadRegister { .. })) => {}, // Success
+            Ok(Some(other)) => panic!("Expected ReadRegister, got {:?}", other),
+            Ok(None) => panic!("Expected Some, got None. Buffer len: {}, contents: {:02x?}", buf.len(), &buf[..]),
+            Err(e) => panic!("Decode error: {}", e),
+        }
+    }
+    
+    #[test]
+    fn decoder_handles_back_to_back_frames() {
+        let mut codec = FrameCodec::default();
+        
+        // Two valid frames back-to-back
+        let mut buf = BytesMut::new();
+        // First frame: register read
+        buf.put_slice(&[0xaa, 0x55, 0x13, 0x70, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10]);
+        // Second frame: nonce response
+        buf.put_slice(&[0xaa, 0x55, 0x18, 0x00, 0xa6, 0x40, 0x02, 0x99, 0x22, 0xf9, 0x91]);
+        
+        // Decode first frame
+        let result1 = codec.decode(&mut buf).unwrap();
+        assert!(matches!(result1, Some(Response::ReadRegister { .. })));
+        assert_eq!(buf.len(), 11, "Should have second frame remaining");
+        
+        // Decode second frame
+        let result2 = codec.decode(&mut buf).unwrap();
+        assert!(matches!(result2, Some(Response::Nonce { .. })));
+        assert_eq!(buf.len(), 0, "Buffer should be empty");
+    }
+    
+    #[test]
+    fn decoder_handles_real_s21_pro_frames() {
+        let mut codec = FrameCodec::default();
+        
+        // Real frames from S21 Pro capture
+        let frames = vec![
+            [0xaa, 0x55, 0x07, 0x35, 0xcd, 0xcf, 0x02, 0x5e, 0x00, 0x2e, 0x96],
+            [0xaa, 0x55, 0x7b, 0x8d, 0x81, 0x60, 0x02, 0x55, 0x00, 0x85, 0x81],
+            [0xaa, 0x55, 0x32, 0x2a, 0x84, 0x5a, 0x02, 0x52, 0x01, 0xb2, 0x8c],
+        ];
+        
+        for frame in frames {
+            let mut buf = BytesMut::new();
+            buf.put_slice(&frame);
+            
+            let result = codec.decode(&mut buf).unwrap();
+            assert!(result.is_some(), "Should decode real S21 Pro frame");
+            assert!(matches!(result, Some(Response::Nonce { .. })), "Should be nonce response");
+        }
+    }
+    
+    #[test]
+    fn decoder_handles_stream_with_lost_bytes() {
+        let mut codec = FrameCodec::default();
+        
+        // Simulate a stream where some bytes in the middle are lost
+        let mut buf = BytesMut::new();
+        // Start of first frame
+        buf.put_slice(&[0xaa, 0x55, 0x13, 0x70, 0x00]); // 5 bytes
+        // Lost bytes... skip to middle of nowhere
+        buf.put_slice(&[0x99, 0x22, 0xf9]); // Random bytes
+        // Valid complete frame
+        buf.put_slice(&[0xaa, 0x55, 0x18, 0x00, 0xa6, 0x40, 0x02, 0x99, 0x22, 0xf9, 0x91]);
+        
+        // Decoder should skip the incomplete/corrupted data and find the valid frame
+        let mut found_valid = false;
+        for _ in 0..20 { // Try up to 20 times
+            if let Some(response) = codec.decode(&mut buf).unwrap() {
+                assert!(matches!(response, Response::Nonce { .. }));
+                found_valid = true;
+                break;
+            }
+        }
+        assert!(found_valid, "Should eventually find the valid frame");
+    }
+    
+    #[test]
+    fn decoder_handles_mid_frame_start() {
+        let mut codec = FrameCodec::default();
+        
+        // Start reading in the middle of a frame
+        let mut buf = BytesMut::new();
+        // Last 5 bytes of some frame
+        buf.put_slice(&[0x02, 0x99, 0x22, 0xf9, 0x91]);
+        // Valid complete frame
+        buf.put_slice(&[0xaa, 0x55, 0x50, 0x03, 0x41, 0xd6, 0x00, 0x81, 0x18, 0x01, 0x9b]);
+        
+        // Total: 5 + 11 = 16 bytes
+        // Should skip the partial frame bytes one by one until finding the valid frame
+        for i in 0..5 {
+            let result = codec.decode(&mut buf).unwrap();
+            assert!(result.is_none(), "Decode {} should return None", i + 1);
+            assert_eq!(buf.len(), 16 - i - 1, "Should have consumed {} bytes", i + 1);
+        }
+        
+        // Now we should have the valid frame
+        let result = codec.decode(&mut buf).unwrap();
+        assert!(result.is_some(), "Should find valid frame after partial data");
+        assert!(matches!(result, Some(Response::Nonce { .. })), "Should be nonce response");
+    }
+    
+    #[test]
+    fn decoder_validates_real_register_responses() {
+        // Test all register read responses are handled correctly
+        let mut codec = FrameCodec::default();
+        
+        // Standard chip detection response
+        let mut buf = BytesMut::new();
+        buf.put_slice(&[0xaa, 0x55, 0x13, 0x70, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10]);
+        
+        let response = codec.decode(&mut buf).unwrap().unwrap();
+        match response {
+            Response::ReadRegister { chip_address, register } => {
+                assert_eq!(chip_address, 0x00);
+                assert!(matches!(register, Register::ChipId { .. }));
+            }
+            _ => panic!("Expected ReadRegister response"),
+        }
+    }
 }
 
 // Bytes go out on the wire least-significant byte first.
@@ -1504,15 +1726,12 @@ mod response_tests {
 /// 
 /// Encodes high-level operations into chip-specific commands and
 /// decodes chip responses into meaningful results.
-pub struct BM13xxProtocol {
-    /// Whether version rolling is enabled
-    version_rolling: bool,
-}
+pub struct BM13xxProtocol {}
 
 impl BM13xxProtocol {
     /// Create a new protocol instance.
-    pub fn new(version_rolling: bool) -> Self {
-        Self { version_rolling }
+    pub fn new() -> Self {
+        Self {}
     }
     
     /// Helper to create a broadcast write command
@@ -1567,11 +1786,9 @@ impl BM13xxProtocol {
         let mut commands = Vec::new();
         
         // Enable version rolling with mask 0xFFFF
-        if self.version_rolling {
-            commands.push(self.broadcast_write(
-                Register::VersionMask(VersionMask::full_rolling())
-            ));
-        }
+        commands.push(self.broadcast_write(
+            Register::VersionMask(VersionMask::full_rolling())
+        ));
         
         // Configure PLL for desired frequency
         let pll_config = frequency.calculate_pll();
@@ -1601,11 +1818,9 @@ impl BM13xxProtocol {
         let mut commands = Vec::new();
         
         // Step 1: Enable version rolling on all chips (broadcast)
-        if self.version_rolling {
-            commands.push(self.broadcast_write(
-                Register::VersionMask(VersionMask::full_rolling())
-            ));
-        }
+        commands.push(self.broadcast_write(
+            Register::VersionMask(VersionMask::full_rolling())
+        ));
         
         // Step 2: Configure init control register
         commands.push(self.broadcast_write(
