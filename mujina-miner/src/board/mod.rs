@@ -5,7 +5,7 @@ use std::error::Error;
 use std::fmt;
 use tokio::sync::mpsc;
 
-use crate::chip::{ChipError, ChipInfo, MiningJob, NonceResult};
+use crate::asic::{ChipError, ChipInfo, MiningJob, NonceResult};
 
 /// Events emitted by a board during operation.
 #[derive(Debug, Clone)]

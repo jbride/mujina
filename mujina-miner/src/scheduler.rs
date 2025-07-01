@@ -11,7 +11,7 @@ use tokio_serial::{self, SerialPortBuilderExt};
 use tokio_util::sync::CancellationToken;
 
 use crate::board::{bitaxe::BitaxeBoard, Board, BoardEvent, BoardError};
-use crate::chip::bm13xx::protocol::{BM13xxProtocol, ChipType, Command, Frequency};
+use crate::asic::bm13xx::protocol::{BM13xxProtocol, ChipType, Command, Frequency};
 use crate::job_generator::{JobGenerator, verify_nonce};
 use crate::tracing::prelude::*;
 
@@ -74,7 +74,7 @@ pub async fn task(running: CancellationToken) {
     info!("Created job generator with difficulty {}", difficulty);
     
     // Track active jobs for nonce verification
-    let mut active_jobs: HashMap<u64, crate::chip::MiningJob> = HashMap::new();
+    let mut active_jobs: HashMap<u64, crate::asic::MiningJob> = HashMap::new();
     
     // Track mining statistics
     let mut stats = MiningStats { difficulty, ..Default::default() };

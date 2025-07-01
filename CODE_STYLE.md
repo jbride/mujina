@@ -118,6 +118,36 @@ pub enum ProtocolError {
 }
 ```
 
+### Lint Attributes
+
+Use `#[expect(...)]` instead of `#[allow(...)]` for intentional lint suppressions.
+This makes the intent explicit and will warn if the suppression becomes unnecessary:
+
+```rust
+// Good: Use expect with a reason
+#[expect(dead_code, reason = "Will be used when pool support is implemented")]
+struct PoolConnection {
+    url: String,
+}
+
+// Good: For unused parameters in trait implementations
+impl Handler for MyHandler {
+    fn handle(&self, #[expect(unused_variables)] _ctx: Context) {
+        // Implementation doesn't need context yet
+    }
+}
+
+// Bad: Don't use allow
+#[allow(dead_code)]  // Avoid this
+struct TempStruct {
+    field: String,
+}
+```
+
+The `expect` attribute requires a reason, making code reviews easier and helping
+future maintainers understand why the suppression exists. When the code changes
+and the suppression is no longer needed, the compiler will warn about it.
+
 ### Async Code
 
 Follow Tokio best practices:

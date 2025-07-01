@@ -12,7 +12,7 @@ use bitcoin::blockdata::block::{Header as BlockHeader};
 use bitcoin::hash_types::{BlockHash, TxMerkleNode};
 use bitcoin::hashes::{Hash, sha256d};
 use bitcoin::pow::{CompactTarget, Target};
-use crate::chip::MiningJob;
+use crate::asic::MiningJob;
 use crate::tracing::prelude::*;
 
 /// Generates mining jobs locally when pool work is unavailable

@@ -9,8 +9,8 @@ use tokio_util::codec::{FramedRead, FramedWrite};
 use futures::sink::SinkExt;
 
 use crate::board::{Board, BoardError, BoardInfo, BoardEvent, JobCompleteReason};
-use crate::chip::{ChipInfo, MiningJob};
-use crate::chip::bm13xx::{self, BM13xxProtocol, protocol::Command};
+use crate::asic::{ChipInfo, MiningJob};
+use crate::asic::bm13xx::{self, BM13xxProtocol, protocol::Command};
 use crate::tracing::prelude::*;
 
 /// A wrapper around AsyncRead that traces raw bytes as they're read
@@ -289,7 +289,7 @@ impl BitaxeBoard {
                                 let core_id = ((nonce >> 25) & 0x7f) as u8;
                                 
                                 // Send nonce found event
-                                let nonce_result = crate::chip::NonceResult {
+                                let nonce_result = crate::asic::NonceResult {
                                     job_id: job_id as u64,
                                     nonce,
                                     hash: [0; 32], // TODO: Calculate actual hash if needed

@@ -10,7 +10,7 @@ use strum::FromRepr;
 use tokio_util::codec::{Decoder, Encoder};
 
 use crate::tracing::prelude::*;
-use crate::chip::{MiningJob, ChipError};
+use crate::asic::{MiningJob, ChipError};
 use super::crc::{crc5, crc5_is_valid, crc16};
 use super::error::ProtocolError;
 
@@ -1157,7 +1157,7 @@ mod init_tests {
     
     #[test]
     fn job_distribution() {
-        use crate::chip::MiningJob;
+        use crate::asic::MiningJob;
         
         let protocol = BM13xxProtocol::new();
         
