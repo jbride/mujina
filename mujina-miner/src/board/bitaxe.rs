@@ -429,7 +429,18 @@ impl BitaxeBoard {
                 
                 // Set initial output voltage (1.2V)
                 match tps546.set_vout(1.2).await {
-                    Ok(()) => info!("Core voltage set to 1.2V"),
+                    Ok(()) => {
+                        info!("Core voltage set to 1.2V");
+                        
+                        // Wait for voltage to stabilize
+                        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                        
+                        // Verify voltage
+                        match tps546.get_vout().await {
+                            Ok(mv) => info!("Core voltage readback: {:.3}V", mv as f32 / 1000.0),
+                            Err(e) => warn!("Failed to read core voltage: {}", e),
+                        }
+                    }
                     Err(e) => {
                         error!("Failed to set initial core voltage: {}", e);
                         return Err(BoardError::InitializationFailed(
@@ -532,7 +543,13 @@ impl BitaxeBoard {
                 };
                 
                 let vout = match power.get_vout().await {
-                    Ok(mv) => format!("{:.3}V", mv as f32 / 1000.0),
+                    Ok(mv) => {
+                        let volts = mv as f32 / 1000.0;
+                        if volts < 1.0 {
+                            warn!("Core voltage low: {:.3}V", volts);
+                        }
+                        format!("{:.3}V", volts)
+                    }
                     Err(_) => "N/A".to_string(),
                 };
                 
@@ -604,6 +621,108 @@ impl Board for BitaxeBoard {
 
         tracing::info!("Board initialized with {} chip(s)", self.chip_infos.len());
         
+        // BM1370 requires additional initialization after chip discovery
+        if self.chip_infos.len() > 0 {
+            // Send core register control commands
+            let core_reg_cmd1 = Command::WriteRegister {
+                all: true,
+                chip_address: 0x00,
+                register: bm13xx::protocol::Register::CoreRegister {
+                    raw_value: 0x8000_8B00,
+                },
+            };
+            self.send_config_command(core_reg_cmd1).await?;
+            
+            let core_reg_cmd2 = Command::WriteRegister {
+                all: true,
+                chip_address: 0x00,
+                register: bm13xx::protocol::Register::CoreRegister {
+                    raw_value: 0x8000_800C,
+                },
+            };
+            self.send_config_command(core_reg_cmd2).await?;
+            
+            // Configure PLL for default frequency (200 MHz)
+            // Register 0x08: PLL0 divider configuration
+            // Default 200MHz: fb_divider=0xA0, ref_divider=0x02, post_dividers=0x41
+            let pll_config = bm13xx::protocol::PllConfig::new(
+                0x40A0, // fb_div (includes 0x40 flag for frequencies >= 2400MHz)
+                0x02,   // ref_div
+                0x41,   // post_div ((5-1) << 4) | (2-1) = 0x41
+            );
+            let pll_cmd = Command::WriteRegister {
+                all: true,
+                chip_address: 0x00,
+                register: bm13xx::protocol::Register::PllDivider(pll_config),
+            };
+            self.send_config_command(pll_cmd).await?;
+            
+            // Small delay for PLL to stabilize
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            
+            // Set ticket mask for difficulty
+            // Register 0x14: ticket mask (difficulty control)
+            let difficulty_mask = bm13xx::protocol::DifficultyMask::from_difficulty(256);
+            let ticket_mask_cmd = Command::WriteRegister {
+                all: true,
+                chip_address: 0x00,
+                register: bm13xx::protocol::Register::TicketMask(difficulty_mask),
+            };
+            self.send_config_command(ticket_mask_cmd).await?;
+            
+            // Additional misc settings from esp-miner
+            // Register 0xB9: Unknown misc settings
+            let misc_b9_cmd = Command::WriteRegister {
+                all: true,
+                chip_address: 0x00,
+                register: bm13xx::protocol::Register::MiscSettings {
+                    raw_value: 0x00004480,
+                },
+            };
+            self.send_config_command(misc_b9_cmd).await?;
+            
+            // Register 0x54: Analog mux control (temperature diode)
+            let analog_mux_cmd = Command::WriteRegister {
+                all: true,
+                chip_address: 0x00,
+                register: bm13xx::protocol::Register::AnalogMux {
+                    raw_value: 0x00000002,
+                },
+            };
+            self.send_config_command(analog_mux_cmd).await?;
+            
+            // Send misc B9 again (esp-miner does this)
+            let misc_b9_cmd2 = Command::WriteRegister {
+                all: true,
+                chip_address: 0x00,
+                register: bm13xx::protocol::Register::MiscSettings {
+                    raw_value: 0x00004480,
+                },
+            };
+            self.send_config_command(misc_b9_cmd2).await?;
+            
+            // Core register control - final setting
+            let core_reg_final = Command::WriteRegister {
+                all: true,
+                chip_address: 0x00,
+                register: bm13xx::protocol::Register::CoreRegister {
+                    raw_value: 0x8000_8DEE,
+                },
+            };
+            self.send_config_command(core_reg_final).await?;
+            
+            // Register 0x10: Hash counting register (nonce range)
+            // Using single chip configuration
+            let hash_count_cmd = Command::WriteRegister {
+                all: true,
+                chip_address: 0x00,
+                register: bm13xx::protocol::Register::NonceRange(
+                    bm13xx::protocol::NonceRangeConfig::single_chip()
+                ),
+            };
+            self.send_config_command(hash_count_cmd).await?;
+        }
+        
         // Initialize fan controller first to test I2C
         self.init_fan_controller().await?;
         
@@ -637,23 +756,31 @@ impl Board for BitaxeBoard {
     }
 
     async fn send_job(&mut self, job: &MiningJob) -> Result<(), BoardError> {
-        // TODO: Job sending is temporarily disabled until peripheral support is complete
-        // This prevents sending work to chips before fan control and temperature monitoring
-        // are implemented, which could cause thermal issues.
-        
-        tracing::info!(
-            "Job {} received but not sent to chips (job sending disabled until peripherals implemented)",
-            job.job_id
-        );
-        
-        // Store current job ID mapping for future use
+        // Convert the job into a BM13xx command
+        let command = self.protocol.encode_mining_job(job, self.next_job_id);
+
+        // Send the job command
+        self.data_writer
+            .send(command)
+            .await
+            .map_err(|e| BoardError::Communication(e))?;
+
+        // Update job tracking
         self.current_job_id = Some(job.job_id);
         
-        // Increment job ID counter to maintain consistency
+        // Increment job ID counter
         self.next_job_id = (self.next_job_id + 24) % 128;
-        
-        // Don't spawn job timer since we're not actually mining
-        
+
+        // Spawn job completion timer
+        self.spawn_job_timer(self.current_job_id);
+
+        tracing::info!(
+            "Sent job {} to {} chip(s) with internal ID {}",
+            job.job_id,
+            self.chip_infos.len(),
+            self.next_job_id.saturating_sub(24)
+        );
+
         Ok(())
     }
 
