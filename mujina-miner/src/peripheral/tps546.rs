@@ -2,6 +2,8 @@
 //!
 //! This module provides a driver for the Texas Instruments TPS546D24A
 //! synchronous buck converter with PMBus interface.
+//!
+//! Datasheet: <https://www.ti.com/product/TPS546D24A>
 
 use crate::hw_trait::I2c;
 use anyhow::{bail, Result};
@@ -17,6 +19,7 @@ mod pmbus {
     pub const ON_OFF_CONFIG: u8 = 0x02;
     pub const CLEAR_FAULTS: u8 = 0x03;
     pub const PHASE: u8 = 0x04;
+    pub const CAPABILITY: u8 = 0x19;
     pub const VOUT_MODE: u8 = 0x20;
     pub const VOUT_COMMAND: u8 = 0x21;
     pub const VOUT_MAX: u8 = 0x24;
@@ -62,8 +65,11 @@ mod pmbus {
     pub const MFR_MODEL: u8 = 0x9A;
     pub const MFR_REVISION: u8 = 0x9B;
     pub const IC_DEVICE_ID: u8 = 0xAD;
+    pub const COMPENSATION_CONFIG: u8 = 0xB1;
+    pub const SYNC_CONFIG: u8 = 0xE4;
     pub const STACK_CONFIG: u8 = 0xEC;
     pub const PIN_DETECT_OVERRIDE: u8 = 0xEE;
+    pub const INTERLEAVE: u8 = 0x37;
 }
 
 /// OPERATION command values
@@ -195,7 +201,14 @@ impl<I2C: I2c> Tps546<I2C> {
         
         // Read back STATUS_WORD for verification like esp-miner does
         let status = self.read_word(pmbus::STATUS_WORD).await?;
-        info!("STATUS_WORD after config: 0x{:04X}", status);
+        let mut status_info = Vec::new();
+        if status & status::PGOOD != 0 { status_info.push("PGOOD"); }
+        if status & status::OFF != 0 { status_info.push("OFF"); }
+        if status_info.is_empty() {
+            info!("STATUS_WORD after config: 0x{:04X}", status);
+        } else {
+            info!("STATUS_WORD after config: 0x{:04X} ({})", status, status_info.join(", "));
+        }
         
         // Log current readings like esp-miner does
         self.log_initial_readings().await?;
@@ -556,6 +569,232 @@ impl<I2C: I2c> Tps546<I2C> {
         Ok(())
     }
 
+    /// Dump the complete TPS546 configuration for debugging
+    pub async fn dump_configuration(&mut self) -> Result<()> {
+        debug!("=== TPS546D24A Configuration Dump ===");
+        
+        // Voltage Configuration
+        debug!("--- Voltage Configuration ---");
+        
+        // VIN settings
+        let vin_on = self.read_word(pmbus::VIN_ON).await?;
+        debug!("VIN_ON: {:.2}V (raw: 0x{:04X})", 
+            self.slinear11_to_float(vin_on), vin_on);
+        
+        let vin_off = self.read_word(pmbus::VIN_OFF).await?;
+        debug!("VIN_OFF: {:.2}V (raw: 0x{:04X})", 
+            self.slinear11_to_float(vin_off), vin_off);
+        
+        let vin_ov_fault = self.read_word(pmbus::VIN_OV_FAULT_LIMIT).await?;
+        debug!("VIN_OV_FAULT_LIMIT: {:.2}V (raw: 0x{:04X})", 
+            self.slinear11_to_float(vin_ov_fault), vin_ov_fault);
+        
+        let vin_uv_warn = self.read_word(pmbus::VIN_UV_WARN_LIMIT).await?;
+        debug!("VIN_UV_WARN_LIMIT: {:.2}V (raw: 0x{:04X})", 
+            self.slinear11_to_float(vin_uv_warn), vin_uv_warn);
+        
+        let vin_ov_response = self.read_byte(pmbus::VIN_OV_FAULT_RESPONSE).await?;
+        debug!("VIN_OV_FAULT_RESPONSE: 0x{:02X}", vin_ov_response);
+        
+        // VOUT settings
+        let vout_max = self.read_word(pmbus::VOUT_MAX).await?;
+        debug!("VOUT_MAX: {:.2}V (raw: 0x{:04X})", 
+            self.ulinear16_to_float(vout_max).await?, vout_max);
+        
+        let vout_ov_fault = self.read_word(pmbus::VOUT_OV_FAULT_LIMIT).await?;
+        let vout_ov_fault_v = self.ulinear16_to_float(vout_ov_fault).await?;
+        debug!("VOUT_OV_FAULT_LIMIT: {:.2}V (raw: 0x{:04X})", 
+            vout_ov_fault_v * self.config.vout_command, vout_ov_fault);
+        
+        let vout_ov_warn = self.read_word(pmbus::VOUT_OV_WARN_LIMIT).await?;
+        let vout_ov_warn_v = self.ulinear16_to_float(vout_ov_warn).await?;
+        debug!("VOUT_OV_WARN_LIMIT: {:.2}V (raw: 0x{:04X})", 
+            vout_ov_warn_v * self.config.vout_command, vout_ov_warn);
+        
+        let vout_margin_high = self.read_word(pmbus::VOUT_MARGIN_HIGH).await?;
+        let vout_margin_high_v = self.ulinear16_to_float(vout_margin_high).await?;
+        debug!("VOUT_MARGIN_HIGH: {:.2}V (raw: 0x{:04X})", 
+            vout_margin_high_v * self.config.vout_command, vout_margin_high);
+        
+        let vout_command = self.read_word(pmbus::VOUT_COMMAND).await?;
+        debug!("VOUT_COMMAND: {:.2}V (raw: 0x{:04X})", 
+            self.ulinear16_to_float(vout_command).await?, vout_command);
+        
+        let vout_margin_low = self.read_word(pmbus::VOUT_MARGIN_LOW).await?;
+        let vout_margin_low_v = self.ulinear16_to_float(vout_margin_low).await?;
+        debug!("VOUT_MARGIN_LOW: {:.2}V (raw: 0x{:04X})", 
+            vout_margin_low_v * self.config.vout_command, vout_margin_low);
+        
+        let vout_uv_warn = self.read_word(pmbus::VOUT_UV_WARN_LIMIT).await?;
+        let vout_uv_warn_v = self.ulinear16_to_float(vout_uv_warn).await?;
+        debug!("VOUT_UV_WARN_LIMIT: {:.2}V (raw: 0x{:04X})", 
+            vout_uv_warn_v * self.config.vout_command, vout_uv_warn);
+        
+        let vout_uv_fault = self.read_word(pmbus::VOUT_UV_FAULT_LIMIT).await?;
+        let vout_uv_fault_v = self.ulinear16_to_float(vout_uv_fault).await?;
+        debug!("VOUT_UV_FAULT_LIMIT: {:.2}V (raw: 0x{:04X})", 
+            vout_uv_fault_v * self.config.vout_command, vout_uv_fault);
+        
+        let vout_min = self.read_word(pmbus::VOUT_MIN).await?;
+        debug!("VOUT_MIN: {:.2}V (raw: 0x{:04X})", 
+            self.ulinear16_to_float(vout_min).await?, vout_min);
+        
+        // Current Configuration and Limits
+        debug!("--- Current Configuration ---");
+        
+        let iout_oc_warn = self.read_word(pmbus::IOUT_OC_WARN_LIMIT).await?;
+        debug!("IOUT_OC_WARN_LIMIT: {:.2}A (raw: 0x{:04X})", 
+            self.slinear11_to_float(iout_oc_warn), iout_oc_warn);
+        
+        let iout_oc_fault = self.read_word(pmbus::IOUT_OC_FAULT_LIMIT).await?;
+        debug!("IOUT_OC_FAULT_LIMIT: {:.2}A (raw: 0x{:04X})", 
+            self.slinear11_to_float(iout_oc_fault), iout_oc_fault);
+        
+        let iout_oc_response = self.read_byte(pmbus::IOUT_OC_FAULT_RESPONSE).await?;
+        debug!("IOUT_OC_FAULT_RESPONSE: 0x{:02X}", iout_oc_response);
+        
+        // Temperature Configuration
+        debug!("--- Temperature Configuration ---");
+        
+        let ot_warn = self.read_word(pmbus::OT_WARN_LIMIT).await?;
+        debug!("OT_WARN_LIMIT: {}°C (raw: 0x{:04X})", 
+            self.slinear11_to_int(ot_warn), ot_warn);
+        
+        let ot_fault = self.read_word(pmbus::OT_FAULT_LIMIT).await?;
+        debug!("OT_FAULT_LIMIT: {}°C (raw: 0x{:04X})", 
+            self.slinear11_to_int(ot_fault), ot_fault);
+        
+        let ot_response = self.read_byte(pmbus::OT_FAULT_RESPONSE).await?;
+        debug!("OT_FAULT_RESPONSE: 0x{:02X}", ot_response);
+        
+        // Current Readings
+        debug!("--- Current Readings ---");
+        
+        let read_vin = self.read_word(pmbus::READ_VIN).await?;
+        debug!("READ_VIN: {:.2}V", self.slinear11_to_float(read_vin));
+        
+        let read_vout = self.read_word(pmbus::READ_VOUT).await?;
+        debug!("READ_VOUT: {:.2}V", self.ulinear16_to_float(read_vout).await?);
+        
+        let read_iout = self.read_word(pmbus::READ_IOUT).await?;
+        debug!("READ_IOUT: {:.2}A", self.slinear11_to_float(read_iout));
+        
+        let read_temp = self.read_word(pmbus::READ_TEMPERATURE_1).await?;
+        debug!("READ_TEMPERATURE_1: {}°C", self.slinear11_to_int(read_temp));
+        
+        // Timing Configuration
+        debug!("--- Timing Configuration ---");
+        
+        let ton_delay = self.read_word(pmbus::TON_DELAY).await?;
+        debug!("TON_DELAY: {}ms", self.slinear11_to_int(ton_delay));
+        
+        let ton_rise = self.read_word(pmbus::TON_RISE).await?;
+        debug!("TON_RISE: {}ms", self.slinear11_to_int(ton_rise));
+        
+        let ton_max_fault = self.read_word(pmbus::TON_MAX_FAULT_LIMIT).await?;
+        debug!("TON_MAX_FAULT_LIMIT: {}ms", self.slinear11_to_int(ton_max_fault));
+        
+        let ton_max_response = self.read_byte(pmbus::TON_MAX_FAULT_RESPONSE).await?;
+        debug!("TON_MAX_FAULT_RESPONSE: 0x{:02X}", ton_max_response);
+        
+        let toff_delay = self.read_word(pmbus::TOFF_DELAY).await?;
+        debug!("TOFF_DELAY: {}ms", self.slinear11_to_int(toff_delay));
+        
+        let toff_fall = self.read_word(pmbus::TOFF_FALL).await?;
+        debug!("TOFF_FALL: {}ms", self.slinear11_to_int(toff_fall));
+        
+        // Operational Configuration
+        debug!("--- Operational Configuration ---");
+        
+        let phase = self.read_byte(pmbus::PHASE).await?;
+        debug!("PHASE: 0x{:02X}", phase);
+        
+        let stack_config = self.read_word(pmbus::STACK_CONFIG).await?;
+        debug!("STACK_CONFIG: 0x{:04X}", stack_config);
+        
+        let sync_config = self.read_byte(pmbus::SYNC_CONFIG).await?;
+        debug!("SYNC_CONFIG: 0x{:02X}", sync_config);
+        
+        let interleave = self.read_word(pmbus::INTERLEAVE).await?;
+        debug!("INTERLEAVE: 0x{:04X}", interleave);
+        
+        let capability = self.read_byte(pmbus::CAPABILITY).await?;
+        debug!("CAPABILITY: 0x{:02X}", capability);
+        
+        let operation = self.read_byte(pmbus::OPERATION).await?;
+        debug!("OPERATION: 0x{:02X} ({})", 
+            operation, 
+            if operation == OPERATION_ON { "ON" } else { "OFF" });
+        
+        let on_off_config = self.read_byte(pmbus::ON_OFF_CONFIG).await?;
+        debug!("ON_OFF_CONFIG: 0x{:02X}", on_off_config);
+        
+        // Compensation Configuration
+        match self.read_block(pmbus::COMPENSATION_CONFIG, 5).await {
+            Ok(comp_config) => {
+                debug!("COMPENSATION_CONFIG: {:02X?}", comp_config);
+            }
+            Err(e) => {
+                debug!("Failed to read COMPENSATION_CONFIG: {}", e);
+            }
+        }
+        
+        // Status Information
+        debug!("--- Status Information ---");
+        
+        let status_word = self.read_word(pmbus::STATUS_WORD).await?;
+        let mut status_bits = Vec::new();
+        if status_word & status::VOUT != 0 { status_bits.push("VOUT"); }
+        if status_word & status::IOUT != 0 { status_bits.push("IOUT"); }
+        if status_word & status::INPUT != 0 { status_bits.push("INPUT"); }
+        if status_word & status::MFR != 0 { status_bits.push("MFR"); }
+        if status_word & status::PGOOD != 0 { status_bits.push("PGOOD"); }
+        if status_word & status::OTHER != 0 { status_bits.push("OTHER"); }
+        if status_word & status::BUSY != 0 { status_bits.push("BUSY"); }
+        if status_word & status::OFF != 0 { status_bits.push("OFF"); }
+        if status_word & status::VOUT_OV != 0 { status_bits.push("VOUT_OV"); }
+        if status_word & status::IOUT_OC != 0 { status_bits.push("IOUT_OC"); }
+        if status_word & status::VIN_UV != 0 { status_bits.push("VIN_UV"); }
+        if status_word & status::TEMP != 0 { status_bits.push("TEMP"); }
+        if status_word & status::CML != 0 { status_bits.push("CML"); }
+        if status_word & status::NONE != 0 { status_bits.push("NONE"); }
+        
+        if status_bits.is_empty() {
+            debug!("STATUS_WORD: 0x{:04X} (no flags set)", status_word);
+        } else {
+            debug!("STATUS_WORD: 0x{:04X} ({})", status_word, status_bits.join(", "));
+        }
+        
+        // Read detailed status registers if main status indicates issues
+        if status_word & status::VOUT != 0 {
+            let vout_status = self.read_byte(pmbus::STATUS_VOUT).await?;
+            debug!("STATUS_VOUT: 0x{:02X}", vout_status);
+        }
+        
+        if status_word & status::IOUT != 0 {
+            let iout_status = self.read_byte(pmbus::STATUS_IOUT).await?;
+            debug!("STATUS_IOUT: 0x{:02X}", iout_status);
+        }
+        
+        if status_word & status::INPUT != 0 {
+            let input_status = self.read_byte(pmbus::STATUS_INPUT).await?;
+            debug!("STATUS_INPUT: 0x{:02X}", input_status);
+        }
+        
+        if status_word & status::TEMP != 0 {
+            let temp_status = self.read_byte(pmbus::STATUS_TEMPERATURE).await?;
+            debug!("STATUS_TEMPERATURE: 0x{:02X}", temp_status);
+        }
+        
+        if status_word & status::CML != 0 {
+            let cml_status = self.read_byte(pmbus::STATUS_CML).await?;
+            debug!("STATUS_CML: 0x{:02X}", cml_status);
+        }
+        
+        debug!("=== End Configuration Dump ===");
+        Ok(())
+    }
+
     // Helper methods for I2C operations
 
     async fn read_byte(&mut self, command: u8) -> Result<u8> {
@@ -587,6 +826,23 @@ impl<I2C: I2c> Tps546<I2C> {
             .write(TPS546_I2C_ADDR, &[command, bytes[0], bytes[1]])
             .await?;
         Ok(())
+    }
+
+    async fn read_block(&mut self, command: u8, length: usize) -> Result<Vec<u8>> {
+        // PMBus block read: first byte is length, then data
+        let mut buffer = vec![0u8; length + 1];
+        self.i2c
+            .write_read(TPS546_I2C_ADDR, &[command], &mut buffer)
+            .await?;
+        
+        // First byte is the length, verify it matches what we expect
+        let reported_length = buffer[0] as usize;
+        if reported_length != length {
+            warn!("Block read length mismatch: expected {}, got {}", length, reported_length);
+        }
+        
+        // Return just the data portion (skip length byte)
+        Ok(buffer[1..=length].to_vec())
     }
 
     // SLINEAR11 format converters
