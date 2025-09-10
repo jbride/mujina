@@ -420,35 +420,89 @@ impl<I2C: I2c> Tps546<I2C> {
             return Ok(());
         }
 
-        // Check for faults
+        // Track if we have critical faults that should fail the check
+        let mut critical_faults = Vec::new();
+        let mut warnings = Vec::new();
+
+        // Check for output voltage faults (critical)
         if status & pmbus::status_word::VOUT != 0 {
             let vout_status = self.read_byte(pmbus::commands::STATUS_VOUT).await?;
             let desc = self.decode_status_vout(vout_status);
-            warn!("VOUT status error: 0x{:02X} ({})", vout_status, desc.join(", "));
+            
+            // OV and UV faults are critical - the output is not within safe operating range
+            if vout_status & (pmbus::status_vout::VOUT_OV_FAULT | pmbus::status_vout::VOUT_UV_FAULT) != 0 {
+                error!("CRITICAL: VOUT fault detected: 0x{:02X} ({})", vout_status, desc.join(", "));
+                critical_faults.push(format!("VOUT fault: {}", desc.join(", ")));
+            } else {
+                warn!("VOUT warning: 0x{:02X} ({})", vout_status, desc.join(", "));
+                warnings.push(format!("VOUT warning: {}", desc.join(", ")));
+            }
         }
 
+        // Check for output current faults (critical)
         if status & pmbus::status_word::IOUT != 0 {
             let iout_status = self.read_byte(pmbus::commands::STATUS_IOUT).await?;
             let desc = self.decode_status_iout(iout_status);
-            warn!("IOUT status error: 0x{:02X} ({})", iout_status, desc.join(", "));
+            
+            // Overcurrent fault is critical - can damage hardware
+            if iout_status & pmbus::status_iout::IOUT_OC_FAULT != 0 {
+                error!("CRITICAL: IOUT overcurrent fault detected: 0x{:02X} ({})", iout_status, desc.join(", "));
+                critical_faults.push(format!("IOUT overcurrent: {}", desc.join(", ")));
+            } else {
+                warn!("IOUT warning: 0x{:02X} ({})", iout_status, desc.join(", "));
+                warnings.push(format!("IOUT warning: {}", desc.join(", ")));
+            }
         }
 
+        // Check for input voltage faults (critical if unit is off)
         if status & pmbus::status_word::INPUT != 0 {
             let input_status = self.read_byte(pmbus::commands::STATUS_INPUT).await?;
             let desc = self.decode_status_input(input_status);
-            warn!("INPUT status error: 0x{:02X} ({})", input_status, desc.join(", "));
+            
+            // Unit off due to low input or UV/OV faults are critical
+            if input_status & (pmbus::status_input::UNIT_OFF_VIN_LOW | 
+                              pmbus::status_input::VIN_UV_FAULT | 
+                              pmbus::status_input::VIN_OV_FAULT) != 0 {
+                error!("CRITICAL: INPUT fault detected: 0x{:02X} ({})", input_status, desc.join(", "));
+                critical_faults.push(format!("INPUT fault: {}", desc.join(", ")));
+            } else {
+                warn!("INPUT warning: 0x{:02X} ({})", input_status, desc.join(", "));
+                warnings.push(format!("INPUT warning: {}", desc.join(", ")));
+            }
         }
 
+        // Check for temperature faults (critical)
         if status & pmbus::status_word::TEMP != 0 {
             let temp_status = self.read_byte(pmbus::commands::STATUS_TEMPERATURE).await?;
             let desc = self.decode_status_temp(temp_status);
-            warn!("TEMPERATURE status error: 0x{:02X} ({})", temp_status, desc.join(", "));
+            
+            // Overtemperature fault is critical
+            if temp_status & pmbus::status_temperature::OT_FAULT != 0 {
+                error!("CRITICAL: Overtemperature fault detected: 0x{:02X} ({})", temp_status, desc.join(", "));
+                critical_faults.push(format!("Overtemperature: {}", desc.join(", ")));
+            } else {
+                warn!("TEMPERATURE warning: 0x{:02X} ({})", temp_status, desc.join(", "));
+                warnings.push(format!("TEMP warning: {}", desc.join(", ")));
+            }
         }
 
+        // Check for communication/memory/logic faults (treat as critical)
         if status & pmbus::status_word::CML != 0 {
             let cml_status = self.read_byte(pmbus::commands::STATUS_CML).await?;
             let desc = self.decode_status_cml(cml_status);
-            warn!("CML status error: 0x{:02X} ({})", cml_status, desc.join(", "));
+            error!("CRITICAL: CML fault detected: 0x{:02X} ({})", cml_status, desc.join(", "));
+            critical_faults.push(format!("CML fault: {}", desc.join(", ")));
+        }
+
+        // Check if unit is OFF (critical - means power has shut down)
+        if status & pmbus::status_word::OFF != 0 {
+            error!("CRITICAL: Power controller is OFF");
+            critical_faults.push("Power controller is OFF".to_string());
+        }
+
+        // Return error if any critical faults detected
+        if !critical_faults.is_empty() {
+            bail!(Tps546Error::FaultDetected(critical_faults.join("; ")));
         }
 
         Ok(())
