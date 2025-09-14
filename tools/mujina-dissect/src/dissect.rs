@@ -98,7 +98,8 @@ fn dissect_response(data: &[u8]) -> (FrameContent, CrcStatus) {
 
     // For now, use a simple response representation until we need full parsing
     // Response frames use CRC5 (confirmed by test case in crc.rs)
-    let crc_valid = crc5_is_valid(&data[2..]);
+    let payload = &data[2..];
+    let crc_valid = crc5_is_valid(payload);
     let crc_status = if crc_valid {
         CrcStatus::Valid
     } else {
