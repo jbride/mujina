@@ -47,6 +47,19 @@ pub fn crc16(data: &[u8]) -> u16 {
     CRC16.finish_crc(&crc)
 }
 
+/// Validates data integrity using the CRC-16-FALSE algorithm.
+///
+/// This function checks if the data matches the provided CRC-16 value.
+/// Unlike CRC-5, CRC-16 is typically provided as a separate value rather
+/// than being appended and validated to zero.
+pub fn crc16_is_valid(data: &[u8], expected_crc: &[u8]) -> bool {
+    if expected_crc.len() != 2 {
+        return false;
+    }
+    let expected = u16::from_le_bytes([expected_crc[0], expected_crc[1]]);
+    crc16(data) == expected
+}
+
 const CRC16_INIT: u16 = 0xFFFF;
 
 const CRC16: CrcAlgo<u16> = CrcAlgo::<u16>::new(
