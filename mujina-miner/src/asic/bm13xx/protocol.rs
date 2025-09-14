@@ -819,13 +819,42 @@ impl Command {
         let crc_valid = crc5_is_valid(&data[2..]);
 
         // Parse type flags
-        let is_work = (type_flags & 0x80) != 0;
-        let is_broadcast = (type_flags & 0x40) != 0;
+        // Based on protocol examples:
+        // 0x40=reg/specific, 0x41=reg/specific, 0x51=reg/broadcast, 0x21=work/specific
+        // Bit 6 (0x40): Register operations (when set), work operations (when clear)
+        // Bit 4 (0x10): Broadcast flag
+        let is_work = (type_flags & 0x40) == 0;
+        let is_broadcast = (type_flags & 0x10) != 0;
         let cmd = type_flags & 0x1f;
 
         if is_work {
-            // For now, return an error for mining jobs (can be implemented later)
-            return Err(ProtocolError::InvalidFrame);
+            // Parse work frame
+            // Length field includes: type(1) + length(1) + job_data(82) + CRC16(2) = 86 total
+            // So job_data length should be _length - 4 (type + length + CRC16)
+            let job_data_len = _length - 4;
+            if job_data_len == 82 && data.len() >= 2 + _length {
+                // This is a JobFull format (82 bytes job data)
+                let job_data_bytes = &data[4..(4 + 82)];
+
+                // Parse JobFullFormat
+                // Layout: job_id(1) + num_midstates(1) + starting_nonce(4) + nbits(4) + ntime(4) + merkle_root(32) + prev_block_hash(32) + version(4) = 82 bytes
+                let job_data = JobFullFormat {
+                    job_id: job_data_bytes[0],
+                    num_midstates: job_data_bytes[1],
+                    starting_nonce: job_data_bytes[2..6].try_into().unwrap(),
+                    nbits: job_data_bytes[6..10].try_into().unwrap(),
+                    ntime: job_data_bytes[10..14].try_into().unwrap(),
+                    merkle_root: job_data_bytes[14..46].try_into().unwrap(),
+                    prev_block_hash: job_data_bytes[46..78].try_into().unwrap(),
+                    version: job_data_bytes[78..82].try_into().unwrap(),
+                };
+
+                let command = Command::JobFull { job_data };
+                return Ok((command, crc_valid));
+            } else {
+                // Unknown job format or incomplete frame
+                return Err(ProtocolError::InvalidFrame);
+            }
         }
 
         // Parse command
