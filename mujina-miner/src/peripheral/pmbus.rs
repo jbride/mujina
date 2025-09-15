@@ -66,7 +66,13 @@ pub enum PmbusCommand {
     CompensationConfig = 0xB1,
     SyncConfig = 0xE4,
     StackConfig = 0xEC,
+    MiscOptions = 0xED,
     PinDetectOverride = 0xEE,
+    SlaveAddress = 0xEF,
+    NvmChecksum = 0xF0,
+    SimulateFault = 0xF1,
+    FusionId0 = 0xFC,
+    FusionId1 = 0xFD,
 }
 
 impl PmbusCommand {
@@ -127,7 +133,13 @@ impl PmbusCommand {
             Self::CompensationConfig => "COMPENSATION_CONFIG",
             Self::SyncConfig => "SYNC_CONFIG",
             Self::StackConfig => "STACK_CONFIG",
+            Self::MiscOptions => "MISC_OPTIONS",
             Self::PinDetectOverride => "PIN_DETECT_OVERRIDE",
+            Self::SlaveAddress => "SLAVE_ADDRESS",
+            Self::NvmChecksum => "NVM_CHECKSUM",
+            Self::SimulateFault => "SIMULATE_FAULT",
+            Self::FusionId0 => "FUSION_ID0",
+            Self::FusionId1 => "FUSION_ID1",
         }
     }
 
@@ -188,7 +200,13 @@ impl PmbusCommand {
             0xB1 => Some(Self::CompensationConfig),
             0xE4 => Some(Self::SyncConfig),
             0xEC => Some(Self::StackConfig),
+            0xED => Some(Self::MiscOptions),
             0xEE => Some(Self::PinDetectOverride),
+            0xEF => Some(Self::SlaveAddress),
+            0xF0 => Some(Self::NvmChecksum),
+            0xF1 => Some(Self::SimulateFault),
+            0xFC => Some(Self::FusionId0),
+            0xFD => Some(Self::FusionId1),
             _ => None,
         }
     }
@@ -270,7 +288,13 @@ impl std::str::FromStr for PmbusCommand {
             "COMPENSATION_CONFIG" => Ok(Self::CompensationConfig),
             "SYNC_CONFIG" => Ok(Self::SyncConfig),
             "STACK_CONFIG" => Ok(Self::StackConfig),
+            "MISC_OPTIONS" => Ok(Self::MiscOptions),
             "PIN_DETECT_OVERRIDE" => Ok(Self::PinDetectOverride),
+            "SLAVE_ADDRESS" => Ok(Self::SlaveAddress),
+            "NVM_CHECKSUM" => Ok(Self::NvmChecksum),
+            "SIMULATE_FAULT" => Ok(Self::SimulateFault),
+            "FUSION_ID0" => Ok(Self::FusionId0),
+            "FUSION_ID1" => Ok(Self::FusionId1),
             _ => Err("Unknown PMBus command name"),
         }
     }
@@ -341,7 +365,13 @@ pub mod commands {
     pub const COMPENSATION_CONFIG: u8 = PmbusCommand::CompensationConfig as u8;
     pub const SYNC_CONFIG: u8 = PmbusCommand::SyncConfig as u8;
     pub const STACK_CONFIG: u8 = PmbusCommand::StackConfig as u8;
+    pub const MISC_OPTIONS: u8 = PmbusCommand::MiscOptions as u8;
     pub const PIN_DETECT_OVERRIDE: u8 = PmbusCommand::PinDetectOverride as u8;
+    pub const SLAVE_ADDRESS: u8 = PmbusCommand::SlaveAddress as u8;
+    pub const NVM_CHECKSUM: u8 = PmbusCommand::NvmChecksum as u8;
+    pub const SIMULATE_FAULT: u8 = PmbusCommand::SimulateFault as u8;
+    pub const FUSION_ID0: u8 = PmbusCommand::FusionId0 as u8;
+    pub const FUSION_ID1: u8 = PmbusCommand::FusionId1 as u8;
 }
 
 /// STATUS_WORD bits (PMBus specification section 17.2)
