@@ -328,6 +328,17 @@ pub mod protocol {
                     decode_write_linear11(data)
                 } // TODO: Add temperature units
 
+                // Scaling factors (Linear11 format, dimensionless)
+                PmbusCommand::VoutScaleLoop => {
+                    if data.len() >= 2 {
+                        let value = u16::from_le_bytes([data[0], data[1]]);
+                        let decoded = pmbus::Linear11::to_float(value);
+                        format!("{:02x?} (scale factor: {:.3})", data, decoded)
+                    } else {
+                        format!("{:02x?}", data)
+                    }
+                }
+
                 // Frequency in kHz (Linear11 format)
                 PmbusCommand::FrequencySwitch => decode_write_frequency(data),
 
