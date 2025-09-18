@@ -10,12 +10,10 @@ use anyhow::{bail, Result};
 use thiserror::Error;
 use tracing::{debug, error, info, trace, warn};
 
-use super::pmbus::{self, Linear11, Linear16, PmbusCommand, StatusDecoder};
+use super::pmbus::{self, linear11, linear16, PmbusCommand, StatusDecoder};
 
-/// Protocol dissection utilities for TPS546
-pub mod protocol {
-    use super::pmbus::{self, PmbusCommand};
-
+/// Constants for TPS546 device identification
+pub mod constants {
     /// Default I2C address for TPS546
     pub const DEFAULT_ADDRESS: u8 = 0x24;
 
@@ -23,778 +21,10 @@ pub mod protocol {
     pub const DEVICE_ID1: [u8; 6] = [0x54, 0x49, 0x54, 0x6B, 0x24, 0x41]; // TPS546D24A
     pub const DEVICE_ID2: [u8; 6] = [0x54, 0x49, 0x54, 0x6D, 0x24, 0x41]; // TPS546D24A
     pub const DEVICE_ID3: [u8; 6] = [0x54, 0x49, 0x54, 0x6D, 0x24, 0x62]; // TPS546D24S
-
-    /// Decode device ID to model string
-    pub fn decode_device_id(data: &[u8]) -> String {
-        if data.len() >= 6 {
-            let id = &data[0..6];
-            let model = if id == DEVICE_ID1 || id == DEVICE_ID2 {
-                "TPS546D24A"
-            } else if id == DEVICE_ID3 {
-                "TPS546D24S"
-            } else {
-                "Unknown device"
-            };
-
-            format!("{:02x?} ({})", data, model)
-        } else {
-            format!("{:02x?}", data)
-        }
-    }
-
-    /// TPS546 context state for tracking VOUT_MODE across operations
-    #[derive(Debug, Default)]
-    pub struct Tps546Context {
-        pub vout_mode: Option<u8>,
-    }
-
-    /// Format a TPS546 I2C transaction with comprehensive PMBus decoding
-    pub fn format_transaction(cmd: u8, data: Option<&[u8]>, is_read: bool) -> String {
-        format_transaction_with_context(cmd, data, is_read, &mut Tps546Context::default())
-    }
-
-    /// Format a TPS546 I2C transaction with context-aware decoding
-    pub fn format_transaction_with_context(
-        cmd: u8,
-        data: Option<&[u8]>,
-        is_read: bool,
-        context: &mut Tps546Context,
-    ) -> String {
-        let cmd_name = pmbus::command_name(cmd);
-
-        // Update context based on this operation - cache VOUT_MODE for future use
-        if cmd == PmbusCommand::VoutMode.as_u8() {
-            if let Some(data) = data {
-                if data.len() >= 1 {
-                    context.vout_mode = Some(data[0]);
-                }
-            }
-        }
-
-        if is_read {
-            if let Some(data) = data {
-                let decoded = decode_read_value_with_context(cmd, data, context);
-                format!("⟶ READ {}={}", cmd_name, decoded)
-            } else {
-                format!("⟶ READ {}", cmd_name)
-            }
-        } else {
-            if let Some(data) = data {
-                let decoded = decode_write_value_with_context(cmd, data, context);
-                format!("⟵ WRITE {}={}", cmd_name, decoded)
-            } else {
-                // Data-less command - only use generic description for truly data-less commands
-                if let Some(command) = PmbusCommand::from_u8(cmd) {
-                    match command {
-                        PmbusCommand::ClearFaults => {
-                            format!("⟵ WRITE {} (clears all fault status bits)", cmd_name)
-                        }
-                        _ => format!("⟵ WRITE {} (register select)", cmd_name),
-                    }
-                } else {
-                    format!("⟵ WRITE CMD[0x{:02x}] (unknown command)", cmd)
-                }
-            }
-        }
-    }
-
-    /// Decode PMBus read operation value with context
-    fn decode_read_value_with_context(cmd: u8, data: &[u8], context: &Tps546Context) -> String {
-        if let Some(command) = PmbusCommand::from_u8(cmd) {
-            match command {
-                // Linear16 format readings (use VOUT_MODE context if available)
-                PmbusCommand::ReadVout => {
-                    decode_linear16_voltage_with_context(data, context.vout_mode)
-                }
-                // Linear16 VOUT configuration reads (use VOUT_MODE context if available)
-                PmbusCommand::VoutCommand
-                | PmbusCommand::VoutMax
-                | PmbusCommand::VoutMin
-                | PmbusCommand::VoutMarginHigh
-                | PmbusCommand::VoutMarginLow
-                | PmbusCommand::VoutOvFaultLimit
-                | PmbusCommand::VoutOvWarnLimit
-                | PmbusCommand::VoutUvWarnLimit
-                | PmbusCommand::VoutUvFaultLimit => {
-                    decode_linear16_voltage_with_context(data, context.vout_mode)
-                }
-                _ => decode_read_value(cmd, data),
-            }
-        } else {
-            decode_read_value(cmd, data)
-        }
-    }
-
-    /// Decode PMBus write operation value with context
-    fn decode_write_value_with_context(cmd: u8, data: &[u8], context: &Tps546Context) -> String {
-        if let Some(command) = PmbusCommand::from_u8(cmd) {
-            match command {
-                // Two-byte Linear16 values (VOUT commands - use VOUT_MODE context if available)
-                PmbusCommand::VoutCommand
-                | PmbusCommand::VoutMax
-                | PmbusCommand::VoutMin
-                | PmbusCommand::VoutMarginHigh
-                | PmbusCommand::VoutMarginLow
-                | PmbusCommand::VoutOvFaultLimit
-                | PmbusCommand::VoutOvWarnLimit
-                | PmbusCommand::VoutUvWarnLimit
-                | PmbusCommand::VoutUvFaultLimit => {
-                    decode_write_linear16_with_context(data, context.vout_mode)
-                }
-                _ => decode_write_value(cmd, data),
-            }
-        } else {
-            decode_write_value(cmd, data)
-        }
-    }
-
-    /// Decode PMBus read operation value
-    fn decode_read_value(cmd: u8, data: &[u8]) -> String {
-        if let Some(command) = PmbusCommand::from_u8(cmd) {
-            match command {
-                // Device identification
-                PmbusCommand::IcDeviceId => decode_device_id(data),
-                PmbusCommand::MfrId | PmbusCommand::MfrModel | PmbusCommand::MfrRevision => {
-                    decode_string_data(data)
-                }
-
-                // Status registers (16-bit)
-                PmbusCommand::StatusWord => {
-                    if data.len() >= 2 {
-                        let status = u16::from_le_bytes([data[0], data[1]]);
-                        let flags = pmbus::StatusDecoder::decode_status_word(status);
-                        if flags.is_empty() {
-                            format!("0x{:04x}", status)
-                        } else {
-                            format!("0x{:04x} ({})", status, flags.join(" | "))
-                        }
-                    } else {
-                        format!("{:02x?}", data)
-                    }
-                }
-
-                // Status registers (8-bit)
-                PmbusCommand::StatusVout => {
-                    decode_status_byte(data, |b| pmbus::StatusDecoder::decode_status_vout(b))
-                }
-                PmbusCommand::StatusIout => {
-                    decode_status_byte(data, |b| pmbus::StatusDecoder::decode_status_iout(b))
-                }
-                PmbusCommand::StatusInput => {
-                    decode_status_byte(data, |b| pmbus::StatusDecoder::decode_status_input(b))
-                }
-                PmbusCommand::StatusTemperature => {
-                    decode_status_byte(data, |b| pmbus::StatusDecoder::decode_status_temp(b))
-                }
-                PmbusCommand::StatusCml => {
-                    decode_status_byte(data, |b| pmbus::StatusDecoder::decode_status_cml(b))
-                }
-
-                // Linear11 format readings (voltage, current, temperature)
-                PmbusCommand::ReadVin => decode_linear11_voltage(data),
-                PmbusCommand::ReadIout => decode_linear11_current(data),
-                PmbusCommand::ReadTemperature1 => decode_linear11_temperature(data),
-
-                // Linear11 voltage configuration reads
-                PmbusCommand::VinOn
-                | PmbusCommand::VinOff
-                | PmbusCommand::VinOvFaultLimit
-                | PmbusCommand::VinUvWarnLimit => decode_linear11_voltage(data),
-
-                // Linear11 current configuration reads
-                PmbusCommand::IoutOcWarnLimit | PmbusCommand::IoutOcFaultLimit => {
-                    decode_linear11_current(data)
-                }
-
-                // Linear11 time values (milliseconds)
-                PmbusCommand::TonDelay
-                | PmbusCommand::TonRise
-                | PmbusCommand::TonMaxFaultLimit
-                | PmbusCommand::ToffDelay
-                | PmbusCommand::ToffFall => {
-                    if data.len() >= 2 {
-                        let value = u16::from_le_bytes([data[0], data[1]]);
-                        let time_ms = pmbus::Linear11::to_int(value);
-                        format!("{:02x?} ({}ms)", data, time_ms)
-                    } else {
-                        format!("{:02x?}", data)
-                    }
-                }
-
-                // Linear16 format readings (requires VOUT_MODE context)
-                PmbusCommand::ReadVout => decode_linear16_voltage(data),
-
-                // Linear16 VOUT configuration reads (context-aware)
-                PmbusCommand::VoutCommand
-                | PmbusCommand::VoutMax
-                | PmbusCommand::VoutMin
-                | PmbusCommand::VoutMarginHigh
-                | PmbusCommand::VoutMarginLow
-                | PmbusCommand::VoutOvFaultLimit
-                | PmbusCommand::VoutOvWarnLimit
-                | PmbusCommand::VoutUvWarnLimit
-                | PmbusCommand::VoutUvFaultLimit => {
-                    decode_linear16_voltage(data) // Will use context in context-aware path
-                }
-
-                // Single byte values
-                PmbusCommand::Page => decode_page(data),
-                PmbusCommand::Operation => decode_operation_mode(data),
-                PmbusCommand::OnOffConfig => decode_on_off_config(data),
-                PmbusCommand::VoutMode => decode_vout_mode(data),
-                PmbusCommand::Phase => decode_phase(data),
-                PmbusCommand::Capability => decode_capability(data),
-
-                // Configuration registers
-                PmbusCommand::StackConfig => {
-                    if data.len() >= 2 {
-                        let config = u16::from_le_bytes([data[0], data[1]]);
-                        let desc = if config == 0x0000 {
-                            "standalone"
-                        } else {
-                            "stacked"
-                        };
-                        format!("{:02x?} ({})", data, desc)
-                    } else {
-                        format!("{:02x?}", data)
-                    }
-                }
-                PmbusCommand::SyncConfig => {
-                    if data.len() >= 1 {
-                        let config = data[0];
-                        let desc = match config {
-                            0x00 => "no sync",
-                            0xf0 => "master sync",
-                            _ => &format!("sync config 0x{:02x}", config),
-                        };
-                        format!("{:02x?} ({})", data, desc)
-                    } else {
-                        format!("{:02x?}", data)
-                    }
-                }
-                PmbusCommand::Interleave => {
-                    if data.len() >= 2 {
-                        let value = u16::from_le_bytes([data[0], data[1]]);
-                        let degrees = (value as f32) * 360.0 / 65536.0;
-                        format!("{:02x?} ({:.1}° phase offset)", data, degrees)
-                    } else {
-                        format!("{:02x?}", data)
-                    }
-                }
-
-                // Data-less write-only command
-                PmbusCommand::ClearFaults => decode_clear_faults_read(data),
-
-                // Fault response bytes
-                PmbusCommand::VinOvFaultResponse
-                | PmbusCommand::IoutOcFaultResponse
-                | PmbusCommand::OtFaultResponse
-                | PmbusCommand::TonMaxFaultResponse => decode_fault_response(data),
-
-                // Default: show raw hex for known commands without specific decoders
-                _ => format!("{:02x?}", data),
-            }
-        } else {
-            // Unknown command code
-            format!("{:02x?}", data)
-        }
-    }
-
-    /// Decode PMBus write operation value
-    fn decode_write_value(cmd: u8, data: &[u8]) -> String {
-        if let Some(command) = PmbusCommand::from_u8(cmd) {
-            match command {
-                // Single byte commands
-                PmbusCommand::Page => {
-                    if data.len() >= 1 {
-                        let page = data[0];
-                        let desc = match page {
-                            0x00 => "page 0",
-                            0xFF => "all pages (multicast)",
-                            p => return format!("{:02x?} (page {})", data, p),
-                        };
-                        format!("{:02x?} ({})", data, desc)
-                    } else {
-                        format!("{:02x?}", data)
-                    }
-                }
-
-                PmbusCommand::Operation => {
-                    if data.len() >= 1 {
-                        let op = data[0];
-                        let desc = match op {
-                            pmbus::operation::OFF_IMMEDIATE => "OFF",
-                            pmbus::operation::SOFT_OFF => "SOFT_OFF",
-                            pmbus::operation::ON => "ON",
-                            pmbus::operation::ON_MARGIN_LOW => "ON_MARGIN_LOW",
-                            pmbus::operation::ON_MARGIN_HIGH => "ON_MARGIN_HIGH",
-                            _ => "unknown",
-                        };
-                        format!("{:02x?} ({})", data, desc)
-                    } else {
-                        format!("{:02x?}", data)
-                    }
-                }
-
-                PmbusCommand::OnOffConfig => {
-                    if data.len() >= 1 {
-                        let config = data[0];
-                        let mut flags = Vec::new();
-                        if config & pmbus::on_off_config::PU != 0 {
-                            flags.push("PowerUp");
-                        }
-                        if config & pmbus::on_off_config::CMD != 0 {
-                            flags.push("CMD");
-                        }
-                        if config & pmbus::on_off_config::CP != 0 {
-                            flags.push("CONTROL_pin");
-                        }
-                        if config & pmbus::on_off_config::POLARITY != 0 {
-                            flags.push("Active_high");
-                        }
-                        if config & pmbus::on_off_config::DELAY != 0 {
-                            flags.push("Turn-off_delay");
-                        }
-
-                        if flags.is_empty() {
-                            format!("{:02x?}", data)
-                        } else {
-                            format!("{:02x?} ({})", data, flags.join(" | "))
-                        }
-                    } else {
-                        format!("{:02x?}", data)
-                    }
-                }
-
-                PmbusCommand::VoutMode => {
-                    if data.len() >= 1 {
-                        let mode = data[0];
-                        let exponent = (mode & 0x1F) as i8;
-                        let exp_signed = if exponent & 0x10 != 0 {
-                            ((exponent as u8) | 0xE0u8) as i8
-                        } else {
-                            exponent
-                        };
-                        format!("{:02x?} (exp={})", data, exp_signed)
-                    } else {
-                        format!("{:02x?}", data)
-                    }
-                }
-
-                PmbusCommand::Phase => decode_phase(data),
-
-                // Voltage values (Linear11 format)
-                PmbusCommand::VinOn
-                | PmbusCommand::VinOff
-                | PmbusCommand::VinOvFaultLimit
-                | PmbusCommand::VinUvWarnLimit => decode_write_linear11_voltage(data),
-
-                // Current values (Linear11 format)
-                PmbusCommand::IoutOcWarnLimit | PmbusCommand::IoutOcFaultLimit => {
-                    decode_write_linear11_current(data)
-                }
-
-                // Temperature values (Linear11 format)
-                PmbusCommand::OtWarnLimit | PmbusCommand::OtFaultLimit => {
-                    decode_write_linear11(data)
-                } // TODO: Add temperature units
-
-                // Scaling factors (Linear11 format, dimensionless)
-                PmbusCommand::VoutScaleLoop => {
-                    if data.len() >= 2 {
-                        let value = u16::from_le_bytes([data[0], data[1]]);
-                        let decoded = pmbus::Linear11::to_float(value);
-                        format!("{:02x?} (scale factor: {:.3})", data, decoded)
-                    } else {
-                        format!("{:02x?}", data)
-                    }
-                }
-
-                // Frequency in kHz (Linear11 format)
-                PmbusCommand::FrequencySwitch => decode_write_frequency(data),
-
-                // Two-byte Linear16 values (VOUT commands - need VOUT_MODE context)
-                PmbusCommand::VoutCommand
-                | PmbusCommand::VoutMax
-                | PmbusCommand::VoutMin
-                | PmbusCommand::VoutMarginHigh
-                | PmbusCommand::VoutMarginLow
-                | PmbusCommand::VoutOvFaultLimit
-                | PmbusCommand::VoutOvWarnLimit
-                | PmbusCommand::VoutUvWarnLimit
-                | PmbusCommand::VoutUvFaultLimit => {
-                    format!("{:02x?} (Linear16 - needs VOUT_MODE)", data)
-                }
-
-                // Timing values (Linear11 format, in milliseconds)
-                PmbusCommand::TonDelay
-                | PmbusCommand::TonRise
-                | PmbusCommand::TonMaxFaultLimit
-                | PmbusCommand::ToffDelay
-                | PmbusCommand::ToffFall => decode_write_linear11_time(data),
-
-                // Data-less write-only command
-                PmbusCommand::ClearFaults => decode_clear_faults_write(data),
-
-                // Fault response bytes
-                PmbusCommand::VinOvFaultResponse
-                | PmbusCommand::IoutOcFaultResponse
-                | PmbusCommand::OtFaultResponse
-                | PmbusCommand::TonMaxFaultResponse => {
-                    if data.len() >= 1 {
-                        let response = data[0];
-                        let desc = pmbus::StatusDecoder::decode_fault_response(response);
-                        format!("{:02x?} ({})", data, desc)
-                    } else {
-                        format!("{:02x?}", data)
-                    }
-                }
-
-                // Default: show raw hex
-                _ => format!("{:02x?}", data),
-            }
-        } else {
-            // Unknown command code
-            format!("{:02x?}", data)
-        }
-    }
-
-    /// Decode string data (manufacturer ID, model, revision)
-    fn decode_string_data(data: &[u8]) -> String {
-        if data.is_empty() {
-            return "empty".to_string();
-        }
-
-        // PMBus block reads have length byte first, then data
-        let actual_data = if data.len() > 1 && data[0] as usize == data.len() - 1 {
-            &data[1..] // Skip length byte
-        } else {
-            data
-        };
-
-        // Check if data contains printable ASCII
-        let has_printable = actual_data.iter().any(|&b| b.is_ascii_graphic());
-
-        if has_printable {
-            let text: String = actual_data
-                .iter()
-                .map(|&b| {
-                    if b.is_ascii_graphic() || b == b' ' {
-                        b as char
-                    } else {
-                        '.'
-                    }
-                })
-                .collect();
-            format!("{:02x?} (\"{}\")", data, text.trim())
-        } else {
-            // All non-printable, just show hex
-            format!("{:02x?} (binary data)", data)
-        }
-    }
-
-    /// Decode status byte with custom decoder
-    fn decode_status_byte<F>(data: &[u8], decoder: F) -> String
-    where
-        F: Fn(u8) -> Vec<&'static str>,
-    {
-        if data.len() >= 1 {
-            let status = data[0];
-            let flags = decoder(status);
-            if flags.is_empty() {
-                format!("0x{:02x}", status)
-            } else {
-                format!("0x{:02x} ({})", status, flags.join(" | "))
-            }
-        } else {
-            format!("{:02x?}", data)
-        }
-    }
-
-    /// Decode Linear11 voltage reading
-    fn decode_linear11_voltage(data: &[u8]) -> String {
-        if data.len() >= 2 {
-            let value = u16::from_le_bytes([data[0], data[1]]);
-            let voltage = pmbus::Linear11::to_float_unsigned(value);
-            format!("{:02x?} ({:.3}V)", data, voltage)
-        } else {
-            format!("{:02x?}", data)
-        }
-    }
-
-    /// Decode Linear11 current reading
-    fn decode_linear11_current(data: &[u8]) -> String {
-        if data.len() >= 2 {
-            let value = u16::from_le_bytes([data[0], data[1]]);
-            let current = pmbus::Linear11::to_float(value);
-            format!("{:02x?} ({:.3}A)", data, current)
-        } else {
-            format!("{:02x?}", data)
-        }
-    }
-
-    /// Decode Linear11 temperature reading
-    fn decode_linear11_temperature(data: &[u8]) -> String {
-        if data.len() >= 2 {
-            let value = u16::from_le_bytes([data[0], data[1]]);
-            let temp = pmbus::Linear11::to_int(value);
-            format!("{:02x?} ({}°C)", data, temp)
-        } else {
-            format!("{:02x?}", data)
-        }
-    }
-
-    /// Decode Linear16 voltage reading (needs VOUT_MODE - show raw for now)
-    fn decode_linear16_voltage(data: &[u8]) -> String {
-        if data.len() >= 2 {
-            let value = u16::from_le_bytes([data[0], data[1]]);
-            // For now, show raw value since we need VOUT_MODE context
-            // This will be enhanced in the context-aware phase
-            format!("{:02x?} (0x{:04x} Linear16)", data, value)
-        } else {
-            format!("{:02x?}", data)
-        }
-    }
-
-    /// Decode Linear16 voltage reading with VOUT_MODE context
-    fn decode_linear16_voltage_with_context(data: &[u8], vout_mode: Option<u8>) -> String {
-        if data.len() >= 2 {
-            let value = u16::from_le_bytes([data[0], data[1]]);
-
-            if let Some(mode) = vout_mode {
-                let voltage = pmbus::Linear16::to_float(value, mode);
-                format!("{:02x?} ({:.3}V)", data, voltage)
-            } else {
-                format!("{:02x?} (0x{:04x} Linear16 - no VOUT_MODE)", data, value)
-            }
-        } else {
-            format!("{:02x?}", data)
-        }
-    }
-
-    /// Decode Linear16 write value with VOUT_MODE context
-    fn decode_write_linear16_with_context(data: &[u8], vout_mode: Option<u8>) -> String {
-        if data.len() >= 2 {
-            let value = u16::from_le_bytes([data[0], data[1]]);
-
-            if let Some(mode) = vout_mode {
-                let voltage = pmbus::Linear16::to_float(value, mode);
-                format!("{:02x?} ({:.3}V)", data, voltage)
-            } else {
-                format!("{:02x?} (Linear16 - no VOUT_MODE)", data)
-            }
-        } else {
-            format!("{:02x?}", data)
-        }
-    }
-
-    /// Decode operation mode
-    fn decode_operation_mode(data: &[u8]) -> String {
-        if data.len() >= 1 {
-            let op = data[0];
-            let desc = match op {
-                pmbus::operation::OFF_IMMEDIATE => "OFF",
-                pmbus::operation::SOFT_OFF => "SOFT_OFF",
-                pmbus::operation::ON => "ON",
-                pmbus::operation::ON_MARGIN_LOW => "ON_MARGIN_LOW",
-                pmbus::operation::ON_MARGIN_HIGH => "ON_MARGIN_HIGH",
-                _ => "unknown",
-            };
-            format!("0x{:02x} ({})", op, desc)
-        } else {
-            format!("{:02x?}", data)
-        }
-    }
-
-    /// Decode ON_OFF_CONFIG register
-    fn decode_on_off_config(data: &[u8]) -> String {
-        if data.len() >= 1 {
-            let config = data[0];
-            let mut flags = Vec::new();
-            if config & pmbus::on_off_config::PU != 0 {
-                flags.push("PowerUp");
-            }
-            if config & pmbus::on_off_config::CMD != 0 {
-                flags.push("CMD");
-            }
-            if config & pmbus::on_off_config::CP != 0 {
-                flags.push("CONTROL_pin");
-            }
-            if config & pmbus::on_off_config::POLARITY != 0 {
-                flags.push("Active_high");
-            }
-            if config & pmbus::on_off_config::DELAY != 0 {
-                flags.push("Turn-off_delay");
-            }
-
-            if flags.is_empty() {
-                format!("0x{:02x}", config)
-            } else {
-                format!("0x{:02x} ({})", config, flags.join(" | "))
-            }
-        } else {
-            format!("{:02x?}", data)
-        }
-    }
-
-    /// Decode VOUT_MODE register
-    fn decode_vout_mode(data: &[u8]) -> String {
-        if data.len() >= 1 {
-            let mode = data[0];
-            let exponent = (mode & 0x1F) as i8;
-            let exp_signed = if exponent & 0x10 != 0 {
-                ((exponent as u8) | 0xE0u8) as i8
-            } else {
-                exponent
-            };
-            format!("0x{:02x} (Linear16, exp={})", mode, exp_signed)
-        } else {
-            format!("{:02x?}", data)
-        }
-    }
-
-    /// Decode PAGE register (PMBus page selection)
-    fn decode_page(data: &[u8]) -> String {
-        if data.len() >= 1 {
-            let page = data[0];
-            match page {
-                0x00 => format!("0x{:02x} (page 0)", page),
-                0xFF => format!("0x{:02x} (all pages - multicast)", page),
-                p => format!("0x{:02x} (page {})", page, p),
-            }
-        } else {
-            format!("{:02x?}", data)
-        }
-    }
-
-    /// Decode PHASE register
-    fn decode_phase(data: &[u8]) -> String {
-        if data.len() >= 1 {
-            let phase = data[0];
-            match phase {
-                0xFF => format!("[{:02x}] (all phases)", phase),
-                0x00 => format!("[{:02x}] (master/phase 0)", phase),
-                p => format!("[{:02x}] (phase {})", phase, p),
-            }
-        } else {
-            format!("{:02x?}", data)
-        }
-    }
-
-    /// Decode CAPABILITY register
-    fn decode_capability(data: &[u8]) -> String {
-        if data.len() >= 1 {
-            let cap = data[0];
-            let mut flags = Vec::new();
-            if cap & 0x80 != 0 {
-                flags.push("PEC");
-            }
-            if cap & 0x40 != 0 {
-                flags.push("400kHz");
-            }
-            if cap & 0x20 != 0 {
-                flags.push("Alert");
-            }
-
-            if flags.is_empty() {
-                format!("0x{:02x}", cap)
-            } else {
-                format!("0x{:02x} ({})", cap, flags.join(" | "))
-            }
-        } else {
-            format!("{:02x?}", data)
-        }
-    }
-
-    /// Decode fault response byte
-    fn decode_fault_response(data: &[u8]) -> String {
-        if data.len() >= 1 {
-            let response = data[0];
-            let desc = pmbus::StatusDecoder::decode_fault_response(response);
-            format!("0x{:02x} ({})", response, desc)
-        } else {
-            format!("{:02x?}", data)
-        }
-    }
-
-    /// Decode Linear11 write value (voltage/current)
-    fn decode_write_linear11(data: &[u8]) -> String {
-        if data.len() >= 2 {
-            let value = u16::from_le_bytes([data[0], data[1]]);
-            let decoded = pmbus::Linear11::to_float(value);
-            format!("{:02x?} ({:.3})", data, decoded)
-        } else {
-            format!("{:02x?}", data)
-        }
-    }
-
-    /// Decode Linear11 time value (milliseconds)
-    fn decode_write_linear11_time(data: &[u8]) -> String {
-        if data.len() >= 2 {
-            let value = u16::from_le_bytes([data[0], data[1]]);
-            let time_ms = pmbus::Linear11::to_int(value);
-            format!("{:02x?} ({}ms)", data, time_ms)
-        } else {
-            format!("{:02x?}", data)
-        }
-    }
-
-    /// Decode Linear11 voltage value
-    fn decode_write_linear11_voltage(data: &[u8]) -> String {
-        if data.len() >= 2 {
-            let value = u16::from_le_bytes([data[0], data[1]]);
-            let decoded = pmbus::Linear11::to_float_unsigned(value);
-            format!("{:02x?} ({:.3}V)", data, decoded)
-        } else {
-            format!("{:02x?}", data)
-        }
-    }
-
-    /// Decode Linear11 current value
-    fn decode_write_linear11_current(data: &[u8]) -> String {
-        if data.len() >= 2 {
-            let value = u16::from_le_bytes([data[0], data[1]]);
-            let decoded = pmbus::Linear11::to_float(value);
-            format!("{:02x?} ({:.3}A)", data, decoded)
-        } else {
-            format!("{:02x?}", data)
-        }
-    }
-
-    /// Decode CLEAR_FAULTS read operation (should not exist)
-    fn decode_clear_faults_read(data: &[u8]) -> String {
-        format!(
-            "{:02x?} (ERROR: CLEAR_FAULTS is write-only per PMBus spec)",
-            data
-        )
-    }
-
-    /// Decode CLEAR_FAULTS write operation (should be data-less)
-    fn decode_clear_faults_write(data: &[u8]) -> String {
-        if data.is_empty() {
-            "data-less command (clears all fault bits)".to_string()
-        } else {
-            format!(
-                "{:02x?} (ERROR: CLEAR_FAULTS should be data-less per PMBus spec)",
-                data
-            )
-        }
-    }
-
-    /// Decode FREQUENCY_SWITCH (Linear11 format, units in kHz)
-    fn decode_write_frequency(data: &[u8]) -> String {
-        if data.len() >= 2 {
-            let value = u16::from_le_bytes([data[0], data[1]]);
-            let freq_khz = pmbus::Linear11::to_float(value);
-            format!("{:02x?} ({:.0}kHz)", data, freq_khz)
-        } else {
-            format!("{:02x?}", data)
-        }
-    }
 }
 
-// Use protocol constants for driver
-use protocol::{DEFAULT_ADDRESS as TPS546_I2C_ADDR, DEVICE_ID1, DEVICE_ID2, DEVICE_ID3};
+// Use constants for driver
+use constants::{DEFAULT_ADDRESS as TPS546_I2C_ADDR, DEVICE_ID1, DEVICE_ID2, DEVICE_ID3};
 
 /// TPS546 configuration parameters
 #[derive(Debug, Clone)]
@@ -876,38 +106,41 @@ impl<I2C: I2c> Tps546<I2C> {
         self.verify_device_id().await?;
 
         // Turn off output during configuration
-        self.write_byte(PmbusCommand::Operation, pmbus::operation::OFF_IMMEDIATE)
-            .await?;
+        self.write_byte(
+            PmbusCommand::Operation,
+            pmbus::Operation::OffImmediate.as_u8(),
+        )
+        .await?;
         debug!("Power output turned off");
 
         // Configure ON_OFF_CONFIG immediately after turning off (esp-miner sequence)
         // Using same configuration as esp-miner - both CONTROL pin and OPERATION command
-        let on_off_val = pmbus::on_off_config::DELAY
-            | pmbus::on_off_config::POLARITY
-            | pmbus::on_off_config::CP
-            | pmbus::on_off_config::CMD
-            | pmbus::on_off_config::PU;
-        self.write_byte(PmbusCommand::OnOffConfig, on_off_val)
+        let on_off_config = pmbus::OnOffConfig::DELAY
+            | pmbus::OnOffConfig::POLARITY
+            | pmbus::OnOffConfig::CP
+            | pmbus::OnOffConfig::CMD
+            | pmbus::OnOffConfig::PU;
+        self.write_byte(PmbusCommand::OnOffConfig, on_off_config.bits())
             .await?;
         let mut config_desc = Vec::new();
-        if on_off_val & pmbus::on_off_config::PU != 0 {
+        if on_off_config.contains(pmbus::OnOffConfig::PU) {
             config_desc.push("PowerUp from CONTROL");
         }
-        if on_off_val & pmbus::on_off_config::CMD != 0 {
+        if on_off_config.contains(pmbus::OnOffConfig::CMD) {
             config_desc.push("OPERATION cmd enabled");
         }
-        if on_off_val & pmbus::on_off_config::CP != 0 {
+        if on_off_config.contains(pmbus::OnOffConfig::CP) {
             config_desc.push("CONTROL pin present");
         }
-        if on_off_val & pmbus::on_off_config::POLARITY != 0 {
+        if on_off_config.contains(pmbus::OnOffConfig::POLARITY) {
             config_desc.push("Active high");
         }
-        if on_off_val & pmbus::on_off_config::DELAY != 0 {
+        if on_off_config.contains(pmbus::OnOffConfig::DELAY) {
             config_desc.push("Turn-off delay enabled");
         }
         debug!(
             "ON_OFF_CONFIG set to 0x{:02X} ({})",
-            on_off_val,
+            on_off_config.bits(),
             config_desc.join(", ")
         );
 
@@ -1190,8 +423,11 @@ impl<I2C: I2c> Tps546<I2C> {
     pub async fn set_vout(&mut self, volts: f32) -> Result<()> {
         if volts == 0.0 {
             // Turn off output
-            self.write_byte(PmbusCommand::Operation, pmbus::operation::OFF_IMMEDIATE)
-                .await?;
+            self.write_byte(
+                PmbusCommand::Operation,
+                pmbus::Operation::OffImmediate.as_u8(),
+            )
+            .await?;
             info!("Output voltage turned off");
         } else {
             // Check voltage range
@@ -1213,12 +449,12 @@ impl<I2C: I2c> Tps546<I2C> {
             debug!("Cleared faults before turn-on");
 
             // Turn on output
-            self.write_byte(PmbusCommand::Operation, pmbus::operation::ON)
+            self.write_byte(PmbusCommand::Operation, pmbus::Operation::On.as_u8())
                 .await?;
 
             // Verify operation
             let op_val = self.read_byte(PmbusCommand::Operation).await?;
-            if op_val != pmbus::operation::ON {
+            if op_val != pmbus::Operation::On.as_u8() {
                 error!("Failed to turn on output, OPERATION = 0x{:02X}", op_val);
             } else {
                 debug!("Power turned ON successfully, OPERATION = 0x{:02X}", op_val);
@@ -1226,7 +462,7 @@ impl<I2C: I2c> Tps546<I2C> {
 
             // Check immediate status after turn-on
             let status = self.read_word(PmbusCommand::StatusWord).await?;
-            if status & pmbus::status_word::OFF != 0 {
+            if pmbus::StatusWord::from_bits_truncate(status).contains(pmbus::StatusWord::OFF) {
                 error!(
                     "WARNING: Power is still OFF after turn-on command! STATUS_WORD = 0x{:04X}",
                     status
@@ -1296,13 +532,15 @@ impl<I2C: I2c> Tps546<I2C> {
         let mut warnings = Vec::new();
 
         // Check for output voltage faults (critical)
-        if status & pmbus::status_word::VOUT != 0 {
+        let status_flags = pmbus::StatusWord::from_bits_truncate(status);
+        if status_flags.contains(pmbus::StatusWord::VOUT) {
             let vout_status = self.read_byte(PmbusCommand::StatusVout).await?;
             let desc = self.decode_status_vout(vout_status);
 
             // OV and UV faults are critical - the output is not within safe operating range
-            if vout_status & (pmbus::status_vout::VOUT_OV_FAULT | pmbus::status_vout::VOUT_UV_FAULT)
-                != 0
+            let vout_flags = pmbus::StatusVout::from_bits_truncate(vout_status);
+            if vout_flags
+                .intersects(pmbus::StatusVout::VOUT_OV_FAULT | pmbus::StatusVout::VOUT_UV_FAULT)
             {
                 error!(
                     "CRITICAL: VOUT fault detected: 0x{:02X} ({})",
@@ -1317,12 +555,13 @@ impl<I2C: I2c> Tps546<I2C> {
         }
 
         // Check for output current faults (critical)
-        if status & pmbus::status_word::IOUT != 0 {
+        if status_flags.contains(pmbus::StatusWord::IOUT) {
             let iout_status = self.read_byte(PmbusCommand::StatusIout).await?;
             let desc = self.decode_status_iout(iout_status);
 
             // Overcurrent fault is critical - can damage hardware
-            if iout_status & pmbus::status_iout::IOUT_OC_FAULT != 0 {
+            let iout_flags = pmbus::StatusIout::from_bits_truncate(iout_status);
+            if iout_flags.contains(pmbus::StatusIout::IOUT_OC_FAULT) {
                 error!(
                     "CRITICAL: IOUT overcurrent fault detected: 0x{:02X} ({})",
                     iout_status,
@@ -1336,17 +575,17 @@ impl<I2C: I2c> Tps546<I2C> {
         }
 
         // Check for input voltage faults (critical if unit is off)
-        if status & pmbus::status_word::INPUT != 0 {
+        if status_flags.contains(pmbus::StatusWord::INPUT) {
             let input_status = self.read_byte(PmbusCommand::StatusInput).await?;
             let desc = self.decode_status_input(input_status);
 
             // Unit off due to low input or UV/OV faults are critical
-            if input_status
-                & (pmbus::status_input::UNIT_OFF_VIN_LOW
-                    | pmbus::status_input::VIN_UV_FAULT
-                    | pmbus::status_input::VIN_OV_FAULT)
-                != 0
-            {
+            let input_flags = pmbus::StatusInput::from_bits_truncate(input_status);
+            if input_flags.intersects(
+                pmbus::StatusInput::UNIT_OFF_VIN_LOW
+                    | pmbus::StatusInput::VIN_UV_FAULT
+                    | pmbus::StatusInput::VIN_OV_FAULT,
+            ) {
                 error!(
                     "CRITICAL: INPUT fault detected: 0x{:02X} ({})",
                     input_status,
@@ -1364,12 +603,13 @@ impl<I2C: I2c> Tps546<I2C> {
         }
 
         // Check for temperature faults (critical)
-        if status & pmbus::status_word::TEMP != 0 {
+        if status_flags.contains(pmbus::StatusWord::TEMP) {
             let temp_status = self.read_byte(PmbusCommand::StatusTemperature).await?;
             let desc = self.decode_status_temp(temp_status);
 
             // Overtemperature fault is critical
-            if temp_status & pmbus::status_temperature::OT_FAULT != 0 {
+            let temp_flags = pmbus::StatusTemperature::from_bits_truncate(temp_status);
+            if temp_flags.contains(pmbus::StatusTemperature::OT_FAULT) {
                 error!(
                     "CRITICAL: Overtemperature fault detected: 0x{:02X} ({})",
                     temp_status,
@@ -1387,7 +627,7 @@ impl<I2C: I2c> Tps546<I2C> {
         }
 
         // Check for communication/memory/logic faults (treat as critical)
-        if status & pmbus::status_word::CML != 0 {
+        if status_flags.contains(pmbus::StatusWord::CML) {
             let cml_status = self.read_byte(PmbusCommand::StatusCml).await?;
             let desc = self.decode_status_cml(cml_status);
             error!(
@@ -1399,7 +639,7 @@ impl<I2C: I2c> Tps546<I2C> {
         }
 
         // Check if unit is OFF (critical - means power has shut down)
-        if status & pmbus::status_word::OFF != 0 {
+        if status_flags.contains(pmbus::StatusWord::OFF) {
             error!(
                 "CRITICAL: Power controller is OFF - Reading all status registers for diagnostics"
             );
@@ -1712,31 +952,34 @@ impl<I2C: I2c> Tps546<I2C> {
         );
 
         let op_val = self.read_byte(PmbusCommand::Operation).await?;
-        let op_desc = match op_val {
-            pmbus::operation::OFF_IMMEDIATE => "OFF (immediate)",
-            pmbus::operation::SOFT_OFF => "SOFT OFF",
-            pmbus::operation::ON => "ON",
-            pmbus::operation::ON_MARGIN_LOW => "ON (margin low)",
-            pmbus::operation::ON_MARGIN_HIGH => "ON (margin high)",
-            _ => "unknown",
+        let op_desc = match pmbus::Operation::try_from(op_val) {
+            Ok(pmbus::Operation::OffImmediate) => "OFF (immediate)",
+            Ok(pmbus::Operation::SoftOff) => "SOFT OFF",
+            Ok(pmbus::Operation::On) => "ON",
+            Ok(pmbus::Operation::OnMarginLow) => "ON (margin low)",
+            Ok(pmbus::Operation::OnMarginHigh) => "ON (margin high)",
+            Ok(pmbus::Operation::MarginLow) => "margin low",
+            Ok(pmbus::Operation::MarginHigh) => "margin high",
+            Err(_) => "unknown",
         };
         debug!("OPERATION: 0x{:02X} ({})", op_val, op_desc);
 
         let on_off_val = self.read_byte(PmbusCommand::OnOffConfig).await?;
+        let on_off_flags = pmbus::OnOffConfig::from_bits_truncate(on_off_val);
         let mut on_off_desc = Vec::new();
-        if on_off_val & pmbus::on_off_config::PU != 0 {
+        if on_off_flags.contains(pmbus::OnOffConfig::PU) {
             on_off_desc.push("PowerUp from CONTROL");
         }
-        if on_off_val & pmbus::on_off_config::CMD != 0 {
+        if on_off_flags.contains(pmbus::OnOffConfig::CMD) {
             on_off_desc.push("CMD enabled");
         }
-        if on_off_val & pmbus::on_off_config::CP != 0 {
+        if on_off_flags.contains(pmbus::OnOffConfig::CP) {
             on_off_desc.push("CONTROL present");
         }
-        if on_off_val & pmbus::on_off_config::POLARITY != 0 {
+        if on_off_flags.contains(pmbus::OnOffConfig::POLARITY) {
             on_off_desc.push("Active high");
         }
-        if on_off_val & pmbus::on_off_config::DELAY != 0 {
+        if on_off_flags.contains(pmbus::OnOffConfig::DELAY) {
             on_off_desc.push("Turn-off delay");
         }
         debug!(
@@ -1772,25 +1015,26 @@ impl<I2C: I2c> Tps546<I2C> {
         }
 
         // Read detailed status registers if main status indicates issues
-        if status_word & pmbus::status_word::VOUT != 0 {
+        let status_flags = pmbus::StatusWord::from_bits_truncate(status_word);
+        if status_flags.contains(pmbus::StatusWord::VOUT) {
             let vout_status = self.read_byte(PmbusCommand::StatusVout).await?;
             let desc = self.decode_status_vout(vout_status);
             debug!("STATUS_VOUT: 0x{:02X} ({})", vout_status, desc.join(", "));
         }
 
-        if status_word & pmbus::status_word::IOUT != 0 {
+        if status_flags.contains(pmbus::StatusWord::IOUT) {
             let iout_status = self.read_byte(PmbusCommand::StatusIout).await?;
             let desc = self.decode_status_iout(iout_status);
             debug!("STATUS_IOUT: 0x{:02X} ({})", iout_status, desc.join(", "));
         }
 
-        if status_word & pmbus::status_word::INPUT != 0 {
+        if status_flags.contains(pmbus::StatusWord::INPUT) {
             let input_status = self.read_byte(PmbusCommand::StatusInput).await?;
             let desc = self.decode_status_input(input_status);
             debug!("STATUS_INPUT: 0x{:02X} ({})", input_status, desc.join(", "));
         }
 
-        if status_word & pmbus::status_word::TEMP != 0 {
+        if status_flags.contains(pmbus::StatusWord::TEMP) {
             let temp_status = self.read_byte(PmbusCommand::StatusTemperature).await?;
             let desc = self.decode_status_temp(temp_status);
             debug!(
@@ -1800,7 +1044,7 @@ impl<I2C: I2c> Tps546<I2C> {
             );
         }
 
-        if status_word & pmbus::status_word::CML != 0 {
+        if status_flags.contains(pmbus::StatusWord::CML) {
             let cml_status = self.read_byte(PmbusCommand::StatusCml).await?;
             let desc = self.decode_status_cml(cml_status);
             debug!("STATUS_CML: 0x{:02X} ({})", cml_status, desc.join(", "));
@@ -1896,19 +1140,19 @@ impl<I2C: I2c> Tps546<I2C> {
     // Helper functions to use PMBus format converters
 
     fn slinear11_to_float(&self, value: u16) -> f32 {
-        Linear11::to_float(value)
+        linear11::to_float(value)
     }
 
     fn slinear11_to_int(&self, value: u16) -> i32 {
-        Linear11::to_int(value)
+        linear11::to_float(value) as i32
     }
 
     fn float_to_slinear11(&self, value: f32) -> u16 {
-        Linear11::from_float(value)
+        linear11::from_float(value)
     }
 
     fn int_to_slinear11(&self, value: i32) -> u16 {
-        Linear11::from_int(value)
+        linear11::from_float(value as f32)
     }
 
     /// Get VOUT_MODE with caching to avoid redundant I2C reads
@@ -1931,12 +1175,12 @@ impl<I2C: I2c> Tps546<I2C> {
 
     async fn ulinear16_to_float(&mut self, value: u16) -> Result<f32> {
         let vout_mode = self.get_vout_mode().await?;
-        Ok(Linear16::to_float(value, vout_mode))
+        Ok(linear16::to_float(value, vout_mode))
     }
 
     async fn float_to_ulinear16(&mut self, value: f32) -> Result<u16> {
         let vout_mode = self.get_vout_mode().await?;
-        Linear16::from_float(value, vout_mode)
+        linear16::from_float(value, vout_mode)
             .map_err(|e| anyhow::anyhow!("ULINEAR16 conversion error: {}", e))
     }
 }
