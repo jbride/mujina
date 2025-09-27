@@ -404,7 +404,7 @@ pub enum RegisterAddress {
     MiscSettings = 0xB9,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum Register {
     ChipId {
         chip_type: ChipType, // Chip type identifier
@@ -441,7 +441,7 @@ pub enum Register {
 }
 
 impl Register {
-    fn decode(address: RegisterAddress, bytes: &[u8; 4]) -> Register {
+    pub fn decode(address: RegisterAddress, bytes: &[u8; 4]) -> Register {
         let raw_value = u32::from_le_bytes(*bytes);
         match address {
             RegisterAddress::ChipId => Register::ChipId {
@@ -552,6 +552,52 @@ impl Register {
             Register::VersionMask(mask) => {
                 let bytes: [u8; 4] = (*mask).into();
                 dst.put_slice(&bytes);
+            }
+        }
+    }
+}
+
+impl std::fmt::Debug for Register {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Register::ChipId {
+                chip_type,
+                core_count,
+                address,
+            } => f
+                .debug_struct("ChipId")
+                .field("chip_type", chip_type)
+                .field("core_count", core_count)
+                .field("address", address)
+                .finish(),
+            Register::PllDivider(config) => f.debug_tuple("PllDivider").field(config).finish(),
+            Register::NonceRange(config) => f.debug_tuple("NonceRange").field(config).finish(),
+            Register::TicketMask(mask) => f.debug_tuple("TicketMask").field(mask).finish(),
+            Register::UartBaud(baud) => f.debug_tuple("UartBaud").field(baud).finish(),
+            Register::IoDriverStrength(strength) => {
+                f.debug_tuple("IoDriverStrength").field(strength).finish()
+            }
+            Register::VersionMask(mask) => f.debug_tuple("VersionMask").field(mask).finish(),
+            Register::MiscControl { raw_value }
+            | Register::UartRelay { raw_value }
+            | Register::AnalogMux { raw_value }
+            | Register::Pll3Parameter { raw_value }
+            | Register::InitControl { raw_value }
+            | Register::Core { raw_value }
+            | Register::MiscSettings { raw_value } => {
+                let register_name = match self {
+                    Register::MiscControl { .. } => "MiscControl",
+                    Register::UartRelay { .. } => "UartRelay",
+                    Register::AnalogMux { .. } => "AnalogMux",
+                    Register::Pll3Parameter { .. } => "Pll3Parameter",
+                    Register::InitControl { .. } => "InitControl",
+                    Register::Core { .. } => "Core",
+                    Register::MiscSettings { .. } => "MiscSettings",
+                    _ => unreachable!(),
+                };
+                f.debug_struct(register_name)
+                    .field("raw_value", &format_args!("0x{:08x}", raw_value))
+                    .finish()
             }
         }
     }
@@ -799,157 +845,7 @@ impl Command {
         }
     }
 
-    /// Parse a command from raw frame data for dissection
-    /// Returns (command, crc_valid)
-    ///
-    /// TODO: Add Response::try_parse_frame() for parsing response frames (AA 55 preamble)
-    /// in the dissector. The runtime FrameCodec handles responses differently (streaming)
-    /// but dissector needs static analysis of complete response frames.
-    ///
-    /// TODO: Consider extracting shared frame validation logic (preamble checks, CRC validation,
-    /// length parsing) into common utilities that both runtime FrameCodec and dissection
-    /// parsing can use. The frame envelope handling is identical regardless of direction
-    /// or I/O model - only payload interpretation and error handling strategies differ.
-    pub fn try_parse_frame(data: &[u8]) -> Result<(Self, bool), ProtocolError> {
-        if data.len() < 5 {
-            return Err(ProtocolError::InvalidFrame);
-        }
-
-        // Check preamble
-        if data[0] != 0x55 || data[1] != 0xAA {
-            return Err(ProtocolError::InvalidFrame);
-        }
-
-        let type_flags = data[2];
-        let _length = data[3] as usize;
-
-        // Parse type flags
-        // Based on protocol examples:
-        // 0x40=reg/specific, 0x41=reg/specific, 0x51=reg/broadcast, 0x21=work/specific
-        // Bit 6 (0x40): Register operations (when set), work operations (when clear)
-        // Bit 4 (0x10): Broadcast flag
-        let is_work = (type_flags & 0x40) == 0;
-        let is_broadcast = (type_flags & 0x10) != 0;
-        let cmd = type_flags & 0x1f;
-
-        // Validate CRC based on frame type
-        let crc_valid = if is_work {
-            // Work frames use CRC16 on the last 2 bytes
-            if data.len() >= 4 {
-                let payload_end = data.len() - 2;
-                let crc_bytes = &data[payload_end..];
-                let payload = &data[2..payload_end];
-                // CRC16 in work frames is stored in big-endian format
-                let expected_crc = u16::from_be_bytes([crc_bytes[0], crc_bytes[1]]);
-                let calculated_crc = crc16(payload);
-                calculated_crc == expected_crc
-            } else {
-                false
-            }
-        } else {
-            // Register frames use CRC5 (skip preamble, include CRC for validation)
-            crc5_is_valid(&data[2..])
-        };
-
-        if is_work {
-            // Parse work frame
-            // Length field includes: type(1) + length(1) + job_data(82) + CRC16(2) = 86 total
-            // So job_data length should be _length - 4 (type + length + CRC16)
-            let job_data_len = _length - 4;
-            if job_data_len == 82 && data.len() >= 2 + _length {
-                // This is a JobFull format (82 bytes job data)
-                let job_data_bytes = &data[4..(4 + 82)];
-
-                // Parse JobFullFormat
-                // Layout: job_id(1) + num_midstates(1) + starting_nonce(4) + nbits(4) + ntime(4) + merkle_root(32) + prev_block_hash(32) + version(4) = 82 bytes
-                let job_data = JobFullFormat {
-                    job_id: job_data_bytes[0],
-                    num_midstates: job_data_bytes[1],
-                    starting_nonce: job_data_bytes[2..6].try_into().unwrap(),
-                    nbits: job_data_bytes[6..10].try_into().unwrap(),
-                    ntime: job_data_bytes[10..14].try_into().unwrap(),
-                    merkle_root: job_data_bytes[14..46].try_into().unwrap(),
-                    prev_block_hash: job_data_bytes[46..78].try_into().unwrap(),
-                    version: job_data_bytes[78..82].try_into().unwrap(),
-                };
-
-                let command = Command::JobFull { job_data };
-                return Ok((command, crc_valid));
-            } else {
-                // Unknown job format or incomplete frame
-                return Err(ProtocolError::InvalidFrame);
-            }
-        }
-
-        // Parse command
-        let command = match (cmd, is_broadcast) {
-            (0, false) => Command::SetChipAddress {
-                chip_address: data[4],
-            },
-            (1, false) => {
-                if data.len() >= 10 {
-                    let chip_address = data[4];
-                    let reg_addr = RegisterAddress::from_repr(data[5])
-                        .ok_or(ProtocolError::InvalidRegisterAddress(data[5]))?;
-                    let value_bytes: [u8; 4] = data[6..10].try_into().unwrap();
-                    let register = Register::decode(reg_addr, &value_bytes);
-                    Command::WriteRegister {
-                        all: false,
-                        chip_address,
-                        register,
-                    }
-                } else {
-                    return Err(ProtocolError::InvalidFrame);
-                }
-            }
-            (2, false) => {
-                if data.len() >= 6 {
-                    let chip_address = data[4];
-                    let reg_addr = RegisterAddress::from_repr(data[5])
-                        .ok_or(ProtocolError::InvalidRegisterAddress(data[5]))?;
-                    Command::ReadRegister {
-                        all: false,
-                        chip_address,
-                        register_address: reg_addr,
-                    }
-                } else {
-                    return Err(ProtocolError::InvalidFrame);
-                }
-            }
-            (1, true) => {
-                if data.len() >= 9 {
-                    let reg_addr = RegisterAddress::from_repr(data[4])
-                        .ok_or(ProtocolError::InvalidRegisterAddress(data[4]))?;
-                    let value_bytes: [u8; 4] = data[5..9].try_into().unwrap();
-                    let register = Register::decode(reg_addr, &value_bytes);
-                    Command::WriteRegister {
-                        all: true,
-                        chip_address: 0x00,
-                        register,
-                    }
-                } else {
-                    return Err(ProtocolError::InvalidFrame);
-                }
-            }
-            (2, true) => {
-                if data.len() >= 5 {
-                    let reg_addr = RegisterAddress::from_repr(data[4])
-                        .ok_or(ProtocolError::InvalidRegisterAddress(data[4]))?;
-                    Command::ReadRegister {
-                        all: true,
-                        chip_address: 0x00,
-                        register_address: reg_addr,
-                    }
-                } else {
-                    return Err(ProtocolError::InvalidFrame);
-                }
-            }
-            (3, false) => Command::ChainInactive,
-            _ => return Err(ProtocolError::InvalidFrame),
-        };
-
-        Ok((command, crc_valid))
-    }
+    // try_parse_frame method removed - use encoder/decoder pattern instead
 }
 
 #[derive(FromRepr)]
