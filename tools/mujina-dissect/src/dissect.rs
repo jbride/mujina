@@ -6,9 +6,9 @@
 //! - Test frame parsing for JobFull work frames and register responses
 //! - Add regression tests to prevent future parsing failures
 
+use crate::bm13xx::{DecodedFrame, Direction};
 use crate::capture::BaudRate;
 use crate::i2c::I2cOperation;
-use crate::serial::{DecodedFrame, Direction};
 use colored::Colorize;
 use mujina_miner::peripheral::{emc2101, pmbus};
 use std::collections::HashMap;

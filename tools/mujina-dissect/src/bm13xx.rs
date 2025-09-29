@@ -1,8 +1,9 @@
-//! BM13xx protocol codec wrapper for dissecting captured serial data.
+//! BM13xx ASIC protocol parsing for dissecting captured serial data.
 //!
-//! This module wraps the driver's FrameCodec to dissect serial frames from
-//! captured logic analyzer data. It feeds raw bytes to the same codec used
-//! during runtime to ensure consistency.
+//! This module wraps the driver's FrameCodec to dissect BM13xx ASIC protocol
+//! frames from captured logic analyzer data. It feeds raw bytes to the same
+//! codec used during runtime to ensure consistency between dissection and
+//! live operation.
 
 use crate::capture::{BaudRate, Channel, SerialEvent};
 use bytes::{Buf, BytesMut};

@@ -1,18 +1,18 @@
 //! Mujina protocol dissector for Saleae Logic 2 captures.
 
+mod bm13xx;
 mod capture;
 mod dissect;
 mod i2c;
 mod output;
-mod serial;
 
 use anyhow::{Context, Result};
+use bm13xx::{CommandStreamingParser, DecodedFrame, ParsedItem, ResponseStreamingParser};
 use capture::{BaudRate, CaptureEvent, CaptureReader, Channel};
 use clap::Parser;
 use dissect::{dissect_decoded_frame, dissect_i2c_operation_with_context, I2cContexts};
 use i2c::{group_pmbus_transactions, group_transactions, I2cAssembler};
 use output::{OutputConfig, OutputEvent};
-use serial::{CommandStreamingParser, DecodedFrame, ParsedItem, ResponseStreamingParser};
 use std::path::PathBuf;
 
 /// Protocol dissector for Bitcoin mining hardware captures

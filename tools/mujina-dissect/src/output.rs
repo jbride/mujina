@@ -1,8 +1,8 @@
 //! Output formatting for dissected frames.
 
+use crate::bm13xx::Direction;
 use crate::capture::BaudRate;
 use crate::dissect::{CrcStatus, DissectedFrame, DissectedI2c, FrameContent, I2cDevice};
-use crate::serial::Direction;
 use colored::Colorize;
 
 /// Gray color for hex data output
