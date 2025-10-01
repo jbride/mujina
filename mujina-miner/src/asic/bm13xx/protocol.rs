@@ -77,7 +77,7 @@ impl Frequency {
                         let fb_div_f =
                             (post_div1 * post_div2) as f32 * target_freq * ref_div as f32
                                 / Self::CRYSTAL_MHZ;
-                        let fb_div = fb_div_f.round() as u16;
+                        let fb_div = fb_div_f.round() as u8;
 
                         if (0xa0..=0xef).contains(&fb_div) {
                             // Calculate actual frequency with these settings
@@ -104,18 +104,30 @@ impl Frequency {
 /// PLL configuration for frequency control
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PllConfig {
-    /// Main feedback divider
-    pub fb_div: u16,
-    /// Reference divider
+    /// VCO control flag (0x40 for VCO < 2400 MHz, 0x50 for VCO >= 2400 MHz)
+    pub flag: u8,
+    /// Feedback divider (0xa0-0xef = 160-239)
+    pub fb_div: u8,
+    /// Reference divider (1 or 2)
     pub ref_div: u8,
-    /// Post divider flags
+    /// Post divider encoded value
     pub post_div: u8,
 }
 
 impl PllConfig {
     /// Create a new PLL configuration
-    pub fn new(fb_div: u16, ref_div: u8, post_div: u8) -> Self {
+    ///
+    /// Automatically calculates the VCO control flag based on frequency:
+    /// - 0x40 if VCO frequency < 2400 MHz
+    /// - 0x50 if VCO frequency >= 2400 MHz
+    /// where VCO frequency = fb_div * 25.0 / ref_div
+    pub fn new(fb_div: u8, ref_div: u8, post_div: u8) -> Self {
+        // Calculate VCO frequency to determine flag
+        let vco_freq = (fb_div as f32) * 25.0 / (ref_div as f32);
+        let flag = if vco_freq >= 2400.0 { 0x50 } else { 0x40 };
+
         Self {
+            flag,
             fb_div,
             ref_div,
             post_div,
@@ -126,7 +138,8 @@ impl PllConfig {
 impl From<u32> for PllConfig {
     fn from(raw: u32) -> Self {
         Self {
-            fb_div: (raw & 0xffff) as u16,
+            flag: (raw & 0xff) as u8,
+            fb_div: ((raw >> 8) & 0xff) as u8,
             ref_div: ((raw >> 16) & 0xff) as u8,
             post_div: ((raw >> 24) & 0xff) as u8,
         }
@@ -135,11 +148,7 @@ impl From<u32> for PllConfig {
 
 impl From<PllConfig> for [u8; 4] {
     fn from(config: PllConfig) -> Self {
-        let mut bytes = [0u8; 4];
-        bytes[0..2].copy_from_slice(&config.fb_div.to_le_bytes());
-        bytes[2] = config.ref_div;
-        bytes[3] = config.post_div;
-        bytes
+        [config.flag, config.fb_div, config.ref_div, config.post_div]
     }
 }
 

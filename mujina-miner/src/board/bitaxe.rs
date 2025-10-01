@@ -566,7 +566,7 @@ impl BitaxeBoard {
         const CRYSTAL_FREQ: f32 = 25.0;
         const MAX_FREQ_ERROR: f32 = 1.0; // Maximum acceptable frequency error in MHz
 
-        let mut best_fb_div = 0u16;
+        let mut best_fb_div = 0u8;
         let mut best_ref_div = 0u8;
         let mut best_post_div1 = 0u8;
         let mut best_post_div2 = 0u8;
@@ -594,7 +594,7 @@ impl BitaxeBoard {
                         let fb_div_f =
                             (post_div1 * post_div2) as f32 * target_freq * ref_div as f32
                                 / CRYSTAL_FREQ;
-                        let fb_div = fb_div_f.round() as u16;
+                        let fb_div = fb_div_f.round() as u8;
 
                         // Check if fb_div is in valid range
                         if (0xa0..=0xef).contains(&fb_div) {
@@ -625,18 +625,9 @@ impl BitaxeBoard {
         // Encode post dividers as per hardware format
         let post_div = ((best_post_div1 - 1) << 4) | (best_post_div2 - 1);
 
-        // Add the 0x50 flag for most frequencies, 0x40 for high frequencies
-        // esp-miner checks: if (fb_divider * 25 / (float) ref_divider >= 2400)
-        let fb_div_with_flag =
-            if (best_fb_div as f32 * CRYSTAL_FREQ / best_ref_div as f32) >= 2400.0 {
-                // This condition is rarely met with our frequency range
-                best_fb_div | 0x5000 // Actually esp-miner doesn't set any flag here, just uses 0x50
-            } else {
-                best_fb_div | 0x5000 // esp-miner sets freqbuf[2] = 0x50 for normal frequencies
-            };
-
+        // PllConfig::new() automatically calculates the flag (0x40 or 0x50) based on VCO frequency
         Some(bm13xx::protocol::PllConfig::new(
-            fb_div_with_flag,
+            best_fb_div,
             best_ref_div,
             post_div,
         ))
@@ -1301,33 +1292,34 @@ mod tests {
     fn test_pll_calculations_match_reference() {
         // Test cases from the Bitaxe Gamma protocol capture
         // Format: (freq_mhz, expected_fb_div, expected_ref_div, expected_post_div)
-        // Note: The capture shows bytes [55 AA 51 09 00 08 XX YY ZZ WW CRC]
-        // where XX YY = fb_div (big-endian), ZZ = ref_div, WW = post_div
+        // Note: The capture shows bytes [55 AA 51 09 00 08 FLAG FB_DIV REF POST CRC]
+        // Format: (freq_mhz, expected_flag, expected_fb_div, expected_ref_div, expected_post_div)
         let test_cases = vec![
             // From the capture document:
-            (62.50, 0x50D2, 0x02, 0x65), // tx: [55 AA 51 09 00 08 50 D2 02 65 05]
-            (68.75, 0x50E7, 0x02, 0x65), // tx: [55 AA 51 09 00 08 50 E7 02 65 1C]
-            (75.00, 0x50D2, 0x02, 0x64), // tx: [55 AA 51 09 00 08 50 D2 02 64 00]
-            (81.25, 0x50E4, 0x02, 0x64), // tx: [55 AA 51 09 00 08 50 E4 02 64 14]
-            (87.50, 0x50C4, 0x02, 0x63), // tx: [55 AA 51 09 00 08 50 C4 02 63 18]
-            (93.75, 0x50D2, 0x02, 0x63), // tx: [55 AA 51 09 00 08 50 D2 02 63 1B]
-            (100.00, 0x50E0, 0x02, 0x63), // tx: [55 AA 51 09 00 08 50 E0 02 63 00]
-            (525.00, 0x50D2, 0x02, 0x40), // tx: [55 AA 51 09 00 08 50 D2 02 40 05] (final)
+            (62.50, 0x50, 0xD2, 0x02, 0x65), // tx: [55 AA 51 09 00 08 50 D2 02 65 05]
+            (68.75, 0x50, 0xE7, 0x02, 0x65), // tx: [55 AA 51 09 00 08 50 E7 02 65 1C]
+            (75.00, 0x50, 0xD2, 0x02, 0x64), // tx: [55 AA 51 09 00 08 50 D2 02 64 00]
+            (81.25, 0x50, 0xE4, 0x02, 0x64), // tx: [55 AA 51 09 00 08 50 E4 02 64 14]
+            (87.50, 0x50, 0xC4, 0x02, 0x63), // tx: [55 AA 51 09 00 08 50 C4 02 63 18]
+            (93.75, 0x50, 0xD2, 0x02, 0x63), // tx: [55 AA 51 09 00 08 50 D2 02 63 1B]
+            (100.00, 0x50, 0xE0, 0x02, 0x63), // tx: [55 AA 51 09 00 08 50 E0 02 63 00]
+            (525.00, 0x50, 0xD2, 0x02, 0x40), // tx: [55 AA 51 09 00 08 50 D2 02 40 05] (final)
         ];
 
-        for (freq_mhz, expected_fb, expected_ref, expected_post) in test_cases {
+        for (freq_mhz, expected_flag, expected_fb, expected_ref, expected_post) in test_cases {
             let config = BitaxeBoard::calculate_pll_for_frequency(freq_mhz)
                 .unwrap_or_else(|| panic!("Failed to calculate PLL for {} MHz", freq_mhz));
 
-            // Extract the actual fb_div without flags for comparison
-            let actual_fb_base = config.fb_div & 0xFF;
-            let expected_fb_base = expected_fb & 0xFF;
-
-            // Check that the base fb_div matches (allowing for different flag bits)
             assert_eq!(
-                actual_fb_base, expected_fb_base,
+                config.flag, expected_flag,
+                "Flag mismatch for {} MHz: expected 0x{:02X}, got 0x{:02X}",
+                freq_mhz, expected_flag, config.flag
+            );
+
+            assert_eq!(
+                config.fb_div, expected_fb,
                 "FB divider mismatch for {} MHz: expected 0x{:02X}, got 0x{:02X}",
-                freq_mhz, expected_fb_base, actual_fb_base
+                freq_mhz, expected_fb, config.fb_div
             );
 
             assert_eq!(
@@ -1346,7 +1338,7 @@ mod tests {
             let post_div1 = ((config.post_div >> 4) & 0xF) + 1;
             let post_div2 = (config.post_div & 0xF) + 1;
             let calculated_freq =
-                25.0 * actual_fb_base as f32 / (config.ref_div * post_div1 * post_div2) as f32;
+                25.0 * config.fb_div as f32 / (config.ref_div * post_div1 * post_div2) as f32;
 
             assert!(
                 (calculated_freq - freq_mhz).abs() < 1.0,
@@ -1392,17 +1384,19 @@ mod tests {
 
     #[test]
     fn test_pll_flag_setting() {
-        // Test that the 0x50 flag is set (esp-miner always uses 0x50 in practice)
+        // Test that the VCO-based flag is set correctly
+        // Flag is 0x50 when VCO frequency >= 2400 MHz, 0x40 otherwise
+        // VCO frequency = fb_div * 25.0 / ref_div
 
-        // Low frequency (should use 0x50 flag)
+        // Low frequency (100 MHz) - VCO will be >= 2400, so should use 0x50
         let low_freq = BitaxeBoard::calculate_pll_for_frequency(100.0).unwrap();
-        assert_eq!(low_freq.fb_div & 0xF000, 0x5000, "Should have 0x50 flag");
+        assert_eq!(low_freq.flag, 0x50, "Should have 0x50 flag for 100 MHz");
 
-        // High frequency also uses 0x50 in esp-miner for our frequency range
+        // High frequency (525 MHz) - VCO will be >= 2400, so should use 0x50
         let high_freq = BitaxeBoard::calculate_pll_for_frequency(525.0).unwrap();
-        assert_eq!(high_freq.fb_div & 0xF000, 0x5000, "Should have 0x50 flag");
+        assert_eq!(high_freq.flag, 0x50, "Should have 0x50 flag for 525 MHz");
 
-        // The 0x40 flag would only be used for very high internal frequencies
-        // which aren't reached in the 56.25-525 MHz range we use
+        // The 0x40 flag would be used for configurations with VCO < 2400 MHz
+        // which aren't typically reached in the 56.25-525 MHz output range we use
     }
 }
