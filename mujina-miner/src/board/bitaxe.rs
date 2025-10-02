@@ -99,7 +99,7 @@ pub struct BitaxeBoard {
     event_rx: Option<tokio::sync::mpsc::Receiver<BoardEvent>>,
     /// Current job ID
     current_job_id: Option<u64>,
-    /// Job ID counter for cycling through 0-127
+    /// Job ID counter for chip-internal job tracking (0-255)
     next_job_id: u8,
     /// Handle for the statistics task
     stats_task_handle: Option<tokio::task::JoinHandle<()>>,
@@ -1157,6 +1157,11 @@ impl Board for BitaxeBoard {
         self.current_job_id = Some(job.job_id);
 
         // Increment job ID counter
+        // The BM13xx protocol uses a u8 job_id field (0-255).
+        // We increment by 24 and wrap at 128, which ensures job IDs are well-distributed
+        // and reduces the chance of job ID collision if the chip is slow to process old jobs.
+        // The value 24 appears to come from reference implementations, though the reason
+        // for this specific value isn't documented. A simpler +1 would also work.
         self.next_job_id = (self.next_job_id + 24) % 128;
 
         // Spawn job completion timer
