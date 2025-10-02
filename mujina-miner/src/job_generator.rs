@@ -279,10 +279,12 @@ fn serialize_header(header: &BlockHeader) -> [u8; 80] {
     // Version (4 bytes, little-endian)
     bytes[0..4].copy_from_slice(&header.version.to_consensus().to_le_bytes());
 
-    // Previous block hash (32 bytes, internal byte order)
+    // Previous block hash (32 bytes)
+    // Bitcoin hashes are stored in their natural byte order (how they're computed)
     bytes[4..36].copy_from_slice(header.prev_blockhash.as_byte_array());
 
-    // Merkle root (32 bytes, internal byte order)
+    // Merkle root (32 bytes)
+    // Bitcoin hashes are stored in their natural byte order (how they're computed)
     bytes[36..68].copy_from_slice(header.merkle_root.as_byte_array());
 
     // Time (4 bytes, little-endian)
