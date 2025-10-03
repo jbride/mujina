@@ -464,8 +464,8 @@ impl SerialControl {
             .set_speed(baud_rate)
             .map_err(|e| SerialError::ConfigError(format!("Failed to set baud rate: {}", e)))?;
 
-        // Apply changes immediately
-        tcsetattr(fd_ref, rustix::termios::OptionalActions::Now, &termios)
+        // Apply changes after output buffer drains (critical for baud rate changes)
+        tcsetattr(fd_ref, rustix::termios::OptionalActions::Drain, &termios)
             .map_err(|e| SerialError::ConfigError(format!("Failed to apply termios: {}", e)))?;
 
         // Update atomic with release ordering to ensure termios changes are visible
