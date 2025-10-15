@@ -13,6 +13,28 @@
 //! interface for the scheduler to obtain and submit work regardless of the
 //! underlying source.
 //!
+//! ## Work Generation Hierarchy
+//!
+//! The mining workflow follows a three-level template hierarchy:
+//!
+//! 1. **[`JobTemplate`]** (from pool/source) - Contains all templates:
+//!    - Version rolling mask ([`VersionTemplate`])
+//!    - Extranonce2 space ([`Extranonce2Template`])
+//!    - Merkle root specification ([`MerkleRootKind`])
+//!
+//! 2. **`HeaderTemplate`** (to hardware) - Partially instantiated:
+//!    - Specific extranonce2 value selected
+//!    - Nonce = 0 (hardware will roll)
+//!    - Version bits may be rolled by hardware
+//!
+//! 3. **[`Share`]** (from hardware) - Fully instantiated:
+//!    - Valid nonce found
+//!    - Meets chip difficulty target
+//!
+//! The scheduler generates many `HeaderTemplate` instances from each
+//! `JobTemplate` by allocating extranonce2 space and rolling extranonce2 and
+//! ntime. Hardware then searches for valid nonces within each header template.
+//!
 //! ## Key Components
 //!
 //! - [`JobSource`]: Core trait that all job sources must implement
@@ -54,11 +76,13 @@ mod test_blocks;
 
 // Re-export types from submodules
 pub use extranonce2::{Extranonce2, Extranonce2Error, Extranonce2Template};
-pub use job::{Job, Share};
+pub use job::{JobTemplate, Share};
 pub use merkle::{MerkleRootKind, MerkleRootTemplate};
 pub use version::VersionTemplate;
 
-// pub use iterator::{JobWork, JobWorkIterator};
+// TODO: Add HeaderTemplate type (Level 2 in the hierarchy)
+// TODO: Re-enable iterator for generating HeaderTemplates from JobTemplate
+// pub use iterator::{HeaderTemplate, HeaderTemplateIterator};
 
 // Re-export submodules once they're implemented
 // pub mod stratum_v1;
@@ -127,11 +151,11 @@ pub trait JobSource: Send + Sync {
     /// Check if connected to the source.
     fn is_connected(&self) -> bool;
 
-    /// Get the next mining job.
+    /// Get the next mining job template.
     ///
     /// This may block until work is available. Returns `None` if
     /// the source is shutting down.
-    async fn get_job(&mut self) -> Result<Option<Job>>;
+    async fn get_job(&mut self) -> Result<Option<JobTemplate>>;
 
     /// Submit a share (solved work) to the source.
     ///

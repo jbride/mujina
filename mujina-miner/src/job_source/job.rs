@@ -1,4 +1,4 @@
-//! Mining job and share types.
+//! Mining job template and share types.
 
 use bitcoin::block::Version;
 use bitcoin::hash_types::BlockHash;
@@ -8,13 +8,18 @@ use super::extranonce2::Extranonce2;
 use super::merkle::MerkleRootKind;
 use super::version::VersionTemplate;
 
-/// Represents a mining job from any source.
+/// Template for mining jobs from any source.
 ///
-/// Jobs may come from pools (Stratum v1/v2), solo mining, or dummy sources for
-/// testing. Depending on the protocol and mode, the merkle root may be fixed or
-/// computed dynamically from coinbase transaction parts.
+/// A job template contains all the information needed to generate block headers
+/// for mining. It includes templates for version rolling, extranonce2 rolling,
+/// and merkle root computation. The scheduler uses this template to generate
+/// many `HeaderTemplate` instances for distribution to hardware.
+///
+/// Job templates may come from pools (Stratum v1/v2), solo mining, or dummy
+/// sources for testing. Depending on the protocol and mode, the merkle root may
+/// be fixed or computed dynamically from coinbase transaction parts.
 #[derive(Debug, Clone)]
-pub struct Job {
+pub struct JobTemplate {
     /// Identifier for this job assigned by the source
     pub id: String,
 
@@ -34,7 +39,7 @@ pub struct Job {
     pub merkle_root: MerkleRootKind,
 }
 
-impl Job {
+impl JobTemplate {
     /// Get the target difficulty as a Target type.
     pub fn target(&self) -> Target {
         Target::from(self.bits)
