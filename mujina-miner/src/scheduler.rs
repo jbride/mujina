@@ -20,15 +20,15 @@ use crate::tracing::prelude::*;
 // - Implement adaptive ramping based on chip response
 // - Add rollback on errors during ramp
 
-/// Run the scheduler task, receiving boards from the board manager.
+/// Run the scheduler task, receiving boards from the backplane.
 pub async fn task(running: CancellationToken, mut board_rx: mpsc::Receiver<Box<dyn Board + Send>>) {
     trace!("Scheduler task started.");
 
-    // Wait for the first board from the board manager
+    // Wait for the first board from the backplane
     let mut board = match board_rx.recv().await {
         Some(board) => {
             info!(
-                "Received board from board manager: {}",
+                "Received board from backplane: {}",
                 board.board_info().model
             );
             info!("Board has {} chip(s)", board.chip_count());

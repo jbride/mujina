@@ -1,8 +1,8 @@
 pub mod api;
 pub mod api_client;
 pub mod asic;
+pub mod backplane;
 pub mod board;
-pub mod board_manager;
 pub mod config;
 pub mod daemon;
 pub mod error;

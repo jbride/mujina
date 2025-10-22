@@ -187,7 +187,7 @@ pub type BoardFactoryFn =
 /// Board descriptor that gets collected by inventory.
 ///
 /// Board implementors use `inventory::submit!` to register their board type
-/// with the system. The board manager will automatically discover all registered
+/// with the system. The backplane will automatically discover all registered
 /// boards at runtime.
 pub struct BoardDescriptor {
     /// USB vendor ID this board handles

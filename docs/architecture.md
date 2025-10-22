@@ -36,7 +36,7 @@ src/
 ├── hw_trait/         # Hardware interface traits (I2C, SPI, GPIO, Serial)
 ├── peripheral/       # Peripheral chip drivers
 ├── asic/             # Mining ASIC drivers
-├── board_manager.rs  # Board lifecycle and hotplug management
+├── backplane.rs      # Backplane: board communication and lifecycle
 ├── scheduler.rs      # Work scheduling and distribution
 ├── job_generator.rs  # Local job generation (testing/solo) [deprecated]
 ├── pool/             # Mining pool connectivity [deprecated]
@@ -227,11 +227,11 @@ impl BitaxeGammaBoard {
 }
 ```
 
-The board_manager responds to transport discovery events by looking up the
+The backplane responds to transport discovery events by looking up the
 appropriate board type and constructing it:
 
 ```rust
-// board_manager.rs - simplified
+// backplane.rs - simplified
 async fn handle_transport_connected(&mut self, event: TransportEvent) {
     // Look up board type in registry based on transport properties
     let board_type = match &event {
@@ -308,13 +308,14 @@ Mining ASIC drivers:
 - Handles: work distribution, nonce collection, frequency control
 - Communicates through hw_trait layer for maximum flexibility
 
-#### `board_manager.rs`
-Manages board lifecycle and hotplug events:
+#### `backplane.rs`
+Communication substrate between boards and scheduler:
 - Listens to `transport` discovery events
 - Identifies board types (USB VID/PID or probing)
 - Creates/destroys board instances
 - Maintains active board registry
-- Routes boards to/from scheduler
+- Routes board events and threads to scheduler
+- Coordinates emergency shutdowns and hotplug
 
 #### `job_source/`
 Unified interface for all mining job sources:
@@ -383,7 +384,7 @@ Dummy Work Generator -----> job_source::Dummy
 
 
 Hotplug Flow:
-USB Device ──> transport ──> BoardConnected Event ──> board_manager
+USB Device ──> transport ──> BoardConnected Event ──> backplane
                                                            |
                                                            v
                                                     Creates Board

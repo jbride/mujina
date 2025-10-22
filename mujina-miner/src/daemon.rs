@@ -9,8 +9,8 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::tracing::prelude::*;
 use crate::{
+    backplane::Backplane,
     board::Board,
-    board_manager::BoardManager,
     scheduler,
     transport::{TransportEvent, UsbTransport},
 };
@@ -49,19 +49,19 @@ impl Daemon {
             }
         });
 
-        // Create and start board manager
-        let mut board_manager = BoardManager::new(transport_rx, board_tx);
+        // Create and start backplane
+        let mut backplane = Backplane::new(transport_rx, board_tx);
         self.tracker.spawn({
             let shutdown = self.shutdown.clone();
             async move {
                 tokio::select! {
-                    result = board_manager.run() => {
+                    result = backplane.run() => {
                         if let Err(e) = result {
-                            error!("Board manager error: {}", e);
+                            error!("Backplane error: {}", e);
                         }
                     }
                     _ = shutdown.cancelled() => {
-                        debug!("Board manager shutting down");
+                        debug!("Backplane shutting down");
                     }
                 }
             }

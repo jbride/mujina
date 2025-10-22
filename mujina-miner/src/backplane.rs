@@ -1,8 +1,9 @@
-//! Board lifecycle and hotplug management.
+//! Backplane for board communication and lifecycle management.
 //!
-//! This module manages the discovery, creation, and lifecycle of mining
-//! boards. It listens for transport events, looks up board types in the
-//! registry, and creates appropriate board instances.
+//! The Backplane acts as the communication substrate between mining boards and
+//! the scheduler. Like a hardware backplane, it provides connection points for
+//! boards to plug into, routes events between components, and manages board
+//! lifecycle (hotplug, emergency shutdown, etc.).
 
 use crate::board::{Board, BoardDescriptor};
 use crate::error::Result;
@@ -35,8 +36,12 @@ impl BoardRegistry {
     }
 }
 
-/// Board manager that handles board lifecycle.
-pub struct BoardManager {
+/// Backplane that connects boards to the scheduler.
+///
+/// Acts as the communication substrate between mining boards and the work
+/// scheduler. Boards plug into the backplane, which routes their events and
+/// manages their lifecycle.
+pub struct Backplane {
     registry: BoardRegistry,
     #[expect(dead_code, reason = "Will track boards for hotplug removal")]
     boards: HashMap<String, Box<dyn Board + Send>>,
@@ -45,8 +50,8 @@ pub struct BoardManager {
     scheduler_tx: mpsc::Sender<Box<dyn Board + Send>>,
 }
 
-impl BoardManager {
-    /// Create a new board manager.
+impl Backplane {
+    /// Create a new backplane.
     pub fn new(
         event_rx: mpsc::Receiver<TransportEvent>,
         scheduler_tx: mpsc::Sender<Box<dyn Board + Send>>,
@@ -59,7 +64,7 @@ impl BoardManager {
         }
     }
 
-    /// Run the board manager event loop.
+    /// Run the backplane event loop.
     pub async fn run(&mut self) -> Result<()> {
         while let Some(event) = self.event_rx.recv().await {
             match event {
