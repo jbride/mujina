@@ -36,6 +36,10 @@ nix = { workspace = true }
 parking_lot = { workspace = true }
 rustix = { workspace = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+tokio-udev = { workspace = true }
+udev = { workspace = true }
+
 [[bin]]
 name = "mujina-minerd"
 path = "src/bin/minerd.rs"
