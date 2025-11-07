@@ -1,5 +1,6 @@
 pub(crate) mod bitaxe;
 pub(crate) mod emberone;
+pub mod pattern;
 
 use async_trait::async_trait;
 use std::{error::Error, fmt, future::Future, pin::Pin};
@@ -199,11 +200,16 @@ pub type BoardFactoryFn =
 /// Board implementors use `inventory::submit!` to register their board type
 /// with the system. The backplane will automatically discover all registered
 /// boards at runtime.
+///
+/// ## Pattern Matching
+///
+/// Each descriptor includes a pattern that specifies which devices it can handle.
+/// When multiple descriptors match a device, the one with the highest specificity
+/// score is selected. This allows generic fallback handlers while ensuring
+/// specific boards are matched correctly.
 pub struct BoardDescriptor {
-    /// USB vendor ID this board handles
-    pub vid: u16,
-    /// USB product ID this board handles
-    pub pid: u16,
+    /// Pattern for matching USB devices
+    pub pattern: pattern::BoardPattern,
     /// Human-readable board name (e.g., "Bitaxe Gamma")
     pub name: &'static str,
     /// Factory function to create the board from USB device info

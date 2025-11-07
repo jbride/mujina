@@ -18,10 +18,14 @@ use tokio_util::sync::CancellationToken;
 pub struct UsbDeviceInfo {
     /// USB vendor ID
     pub vid: u16,
-    /// USB product ID  
+    /// USB product ID
     pub pid: u16,
     /// Device serial number (if available)
     pub serial_number: Option<String>,
+    /// Manufacturer string (if available)
+    pub manufacturer: Option<String>,
+    /// Product string (if available)
+    pub product: Option<String>,
     /// USB device path (e.g., "/sys/bus/usb/devices/1-1.2")
     pub device_path: String,
     /// Serial port device nodes associated with this USB device

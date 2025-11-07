@@ -18,23 +18,33 @@ use tokio::sync::mpsc;
 pub struct BoardRegistry;
 
 impl BoardRegistry {
-    /// Find a board descriptor that can handle this USB device.
-    pub fn find_descriptor(&self, vid: u16, pid: u16) -> Option<&'static BoardDescriptor> {
-        inventory::iter::<BoardDescriptor>().find(|desc| desc.vid == vid && desc.pid == pid)
+    /// Find the best matching board descriptor for this USB device.
+    ///
+    /// Uses pattern matching with specificity scoring to select the most
+    /// appropriate board handler. When multiple patterns match, the one
+    /// with the highest specificity score wins.
+    ///
+    /// Returns None if no registered boards match the device.
+    pub fn find_descriptor(&self, device: &UsbDeviceInfo) -> Option<&'static BoardDescriptor> {
+        inventory::iter::<BoardDescriptor>()
+            .filter(|desc| desc.pattern.matches(device))
+            .max_by_key(|desc| desc.pattern.specificity())
     }
 
     /// Create a board from USB device info.
     pub async fn create_board(&self, device: UsbDeviceInfo) -> Result<Box<dyn Board + Send>> {
-        let desc = self
-            .find_descriptor(device.vid, device.pid)
-            .ok_or_else(|| {
-                crate::error::Error::Other(format!(
-                    "No board registered for {:04x}:{:04x}",
-                    device.vid, device.pid
-                ))
-            })?;
+        let desc = self.find_descriptor(&device).ok_or_else(|| {
+            crate::error::Error::Other(format!(
+                "No board registered for VID={:04x} PID={:04x} Manufacturer={:?} Product={:?}",
+                device.vid, device.pid, device.manufacturer, device.product
+            ))
+        })?;
 
-        tracing::info!("Creating {} board from USB device", desc.name);
+        tracing::info!(
+            "Creating {} board from USB device (pattern specificity: {})",
+            desc.name,
+            desc.pattern.specificity()
+        );
         (desc.create_fn)(device).await
     }
 }

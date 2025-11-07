@@ -36,6 +36,15 @@ use futures::stream::StreamExt;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+/// Extracted USB device properties from udev.
+struct DeviceProperties {
+    vid: u16,
+    pid: u16,
+    serial_number: Option<String>,
+    manufacturer: Option<String>,
+    product: Option<String>,
+}
+
 /// Linux udev-based USB discovery implementation.
 pub struct LinuxUdevDiscovery {
     // Future: Add state fields if needed for monitoring
@@ -49,14 +58,11 @@ impl LinuxUdevDiscovery {
         Ok(Self {})
     }
 
-    /// Extract VID, PID, and serial number from a udev device.
+    /// Extract VID, PID, serial, manufacturer, and product from a udev device.
     ///
-    /// These are typically found in device attributes as hexadecimal strings.
-    /// VID and PID are required; serial number is optional.
-    fn extract_device_properties(
-        &self,
-        device: &udev::Device,
-    ) -> Result<(u16, u16, Option<String>)> {
+    /// VID and PID are found in device attributes as hexadecimal strings and are required.
+    /// Serial number, manufacturer, and product strings are optional.
+    fn extract_device_properties(&self, device: &udev::Device) -> Result<DeviceProperties> {
         // Extract VID (vendor ID) - typically 4 hex digits like "0403"
         let vid_str = device
             .attribute_value("idVendor")
@@ -76,19 +82,39 @@ impl LinuxUdevDiscovery {
             .map_err(|e| crate::error::Error::Other(format!("Invalid PID '{}': {}", pid_str, e)))?;
 
         // Extract serial number (optional)
-        let serial = device
+        let serial_number = device
             .attribute_value("serial")
             .and_then(|v| v.to_str())
             .map(|s| s.to_string());
 
+        // Extract manufacturer string (optional)
+        let manufacturer = device
+            .attribute_value("manufacturer")
+            .and_then(|v| v.to_str())
+            .map(|s| s.to_string());
+
+        // Extract product string (optional)
+        let product = device
+            .attribute_value("product")
+            .and_then(|v| v.to_str())
+            .map(|s| s.to_string());
+
         trace!(
-            "Extracted device properties: VID={:04x}, PID={:04x}, serial={:?}",
+            "Extracted device properties: VID={:04x}, PID={:04x}, serial={:?}, manufacturer={:?}, product={:?}",
             vid,
             pid,
-            serial
+            serial_number,
+            manufacturer,
+            product
         );
 
-        Ok((vid, pid, serial))
+        Ok(DeviceProperties {
+            vid,
+            pid,
+            serial_number,
+            manufacturer,
+            product,
+        })
     }
 
     /// Find serial port devices (tty) associated with this USB device.
@@ -159,7 +185,7 @@ impl LinuxUdevDiscovery {
     /// structure that can be sent to the backplane.
     fn build_device_info(&self, device: &udev::Device) -> Result<UsbDeviceInfo> {
         // Extract basic device properties
-        let (vid, pid, serial_number) = self.extract_device_properties(device)?;
+        let props = self.extract_device_properties(device)?;
 
         // Get device path
         let device_path = device
@@ -172,9 +198,11 @@ impl LinuxUdevDiscovery {
         let serial_ports = self.find_serial_ports(device)?;
 
         Ok(UsbDeviceInfo {
-            vid,
-            pid,
-            serial_number,
+            vid: props.vid,
+            pid: props.pid,
+            serial_number: props.serial_number,
+            manufacturer: props.manufacturer,
+            product: props.product,
             device_path,
             serial_ports,
         })
