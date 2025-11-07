@@ -6,8 +6,7 @@
 //!
 //! Datasheet: <https://www.microchip.com/en-us/product/emc2101>
 
-use crate::hw_trait::i2c::I2c;
-use crate::hw_trait::{HwError, Result};
+use crate::hw_trait::{i2c::I2c, HwError, Result};
 
 /// Default I2C address for EMC2101
 pub const DEFAULT_ADDRESS: u8 = 0x4C;

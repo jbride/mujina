@@ -5,10 +5,12 @@
 //! boards to plug into, routes events between components, and manages board
 //! lifecycle (hotplug, emergency shutdown, etc.).
 
-use crate::board::{Board, BoardDescriptor};
-use crate::error::Result;
-use crate::hash_thread::HashThread;
-use crate::transport::{TransportEvent, UsbDeviceInfo};
+use crate::{
+    board::{Board, BoardDescriptor},
+    error::Result,
+    hash_thread::HashThread,
+    transport::{usb::TransportEvent as UsbTransportEvent, TransportEvent, UsbDeviceInfo},
+};
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 
@@ -79,14 +81,9 @@ impl Backplane {
     }
 
     /// Handle USB transport events.
-    async fn handle_usb_event(
-        &mut self,
-        event: crate::transport::usb::TransportEvent,
-    ) -> Result<()> {
-        use crate::transport::usb::TransportEvent;
-
+    async fn handle_usb_event(&mut self, event: UsbTransportEvent) -> Result<()> {
         match event {
-            TransportEvent::UsbDeviceConnected(device_info) => {
+            UsbTransportEvent::UsbDeviceConnected(device_info) => {
                 let vid = device_info.vid;
                 let pid = device_info.pid;
                 tracing::info!("USB device connected: {:04x}:{:04x}", vid, pid);
@@ -143,7 +140,7 @@ impl Backplane {
                     }
                 }
             }
-            TransportEvent::UsbDeviceDisconnected { device_path } => {
+            UsbTransportEvent::UsbDeviceDisconnected { device_path } => {
                 tracing::info!("USB device disconnected: {}", device_path);
 
                 // Find and shutdown the board

@@ -27,7 +27,7 @@ pub mod task;
 use async_trait::async_trait;
 use tokio::sync::mpsc;
 
-use task::{HashTask, Share};
+use self::task::{HashTask, Share};
 
 /// HashThread capabilities reported to scheduler for work assignment decisions.
 #[derive(Debug, Clone)]

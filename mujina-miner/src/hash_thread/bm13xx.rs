@@ -7,19 +7,21 @@
 //! The thread is implemented as an actor task that monitors the serial bus for
 //! chip responses, filters shares, and manages work assignment.
 
-use async_trait::async_trait;
-use futures::sink::Sink;
-use futures::stream::Stream;
 use std::sync::{Arc, RwLock};
-use tokio::sync::{mpsc, watch};
+
+use async_trait::async_trait;
+use futures::{sink::Sink, stream::Stream};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio_stream::StreamExt;
 
 use super::{
-    HashThread, HashThreadCapabilities, HashThreadError, HashThreadEvent, HashThreadStatus,
+    task::HashTask, HashThread, HashThreadCapabilities, HashThreadError, HashThreadEvent,
+    HashThreadStatus,
 };
-use crate::asic::bm13xx;
-use crate::board::bitaxe::ThreadRemovalSignal;
-use crate::hash_thread::task::HashTask;
+use crate::{
+    asic::bm13xx::{self, protocol},
+    board::bitaxe::ThreadRemovalSignal,
+};
 
 /// Command messages sent from scheduler to thread
 #[derive(Debug)]
@@ -27,21 +29,18 @@ enum ThreadCommand {
     /// Update work (old shares still valid)
     UpdateWork {
         new_task: HashTask,
-        response_tx:
-            tokio::sync::oneshot::Sender<std::result::Result<Option<HashTask>, HashThreadError>>,
+        response_tx: oneshot::Sender<std::result::Result<Option<HashTask>, HashThreadError>>,
     },
 
     /// Replace work (old shares invalid)
     ReplaceWork {
         new_task: HashTask,
-        response_tx:
-            tokio::sync::oneshot::Sender<std::result::Result<Option<HashTask>, HashThreadError>>,
+        response_tx: oneshot::Sender<std::result::Result<Option<HashTask>, HashThreadError>>,
     },
 
     /// Go idle (stop hashing, low power)
     GoIdle {
-        response_tx:
-            tokio::sync::oneshot::Sender<std::result::Result<Option<HashTask>, HashThreadError>>,
+        response_tx: oneshot::Sender<std::result::Result<Option<HashTask>, HashThreadError>>,
     },
 
     /// Shutdown the thread
@@ -82,11 +81,8 @@ impl BM13xxThread {
         removal_rx: watch::Receiver<ThreadRemovalSignal>,
     ) -> Self
     where
-        R: Stream<Item = Result<bm13xx::protocol::Response, std::io::Error>>
-            + Unpin
-            + Send
-            + 'static,
-        W: Sink<bm13xx::protocol::Command> + Unpin + Send + 'static,
+        R: Stream<Item = Result<protocol::Response, std::io::Error>> + Unpin + Send + 'static,
+        W: Sink<protocol::Command> + Unpin + Send + 'static,
         W::Error: std::fmt::Debug,
     {
         let (cmd_tx, cmd_rx) = mpsc::channel(10);
@@ -129,7 +125,7 @@ impl HashThread for BM13xxThread {
         &mut self,
         new_work: HashTask,
     ) -> std::result::Result<Option<HashTask>, HashThreadError> {
-        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        let (response_tx, response_rx) = oneshot::channel();
 
         self.command_tx
             .send(ThreadCommand::UpdateWork {
@@ -148,7 +144,7 @@ impl HashThread for BM13xxThread {
         &mut self,
         new_work: HashTask,
     ) -> std::result::Result<Option<HashTask>, HashThreadError> {
-        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        let (response_tx, response_rx) = oneshot::channel();
 
         self.command_tx
             .send(ThreadCommand::ReplaceWork {
@@ -164,7 +160,7 @@ impl HashThread for BM13xxThread {
     }
 
     async fn go_idle(&mut self) -> std::result::Result<Option<HashTask>, HashThreadError> {
-        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        let (response_tx, response_rx) = oneshot::channel();
 
         self.command_tx
             .send(ThreadCommand::GoIdle { response_tx })

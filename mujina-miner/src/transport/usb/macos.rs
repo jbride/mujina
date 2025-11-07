@@ -11,7 +11,10 @@
 //! - Map IOKit device properties to UsbDeviceInfo
 //! - Handle macOS-specific device paths and serial port naming
 
-use crate::error::{Error, Result};
+use crate::{
+    error::{Error, Result},
+    transport::TransportEvent,
+};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -30,7 +33,7 @@ impl MacOsIoKitDiscovery {
 impl super::UsbDiscoveryImpl for MacOsIoKitDiscovery {
     fn monitor_blocking(
         self: Box<Self>,
-        _event_tx: mpsc::Sender<super::super::TransportEvent>,
+        _event_tx: mpsc::Sender<TransportEvent>,
         _shutdown: CancellationToken,
     ) -> Result<()> {
         unimplemented!("macOS USB monitoring not yet implemented")

@@ -1,15 +1,14 @@
 pub(crate) mod bitaxe;
 
 use async_trait::async_trait;
-use std::error::Error;
-use std::fmt;
-use std::future::Future;
-use std::pin::Pin;
+use std::{error::Error, fmt, future::Future, pin::Pin};
 use tokio::sync::mpsc;
 
-use crate::asic::{ChipError, ChipInfo, MiningJob, NonceResult};
-use crate::hash_thread::HashThread;
-use crate::transport::UsbDeviceInfo;
+use crate::{
+    asic::{ChipError, ChipInfo, MiningJob, NonceResult},
+    hash_thread::HashThread,
+    transport::UsbDeviceInfo,
+};
 
 /// Events emitted by a board during operation.
 #[derive(Debug, Clone)]

@@ -24,6 +24,8 @@ pub mod block_881423 {
     use bitcoin::hashes::Hash;
     use bitcoin::pow::CompactTarget;
 
+    use crate::job_source::Extranonce2;
+
     // Ground truth field values: These typed constants represent the authoritative
     // field values from block 881,423, parsed from the blockchain. They provide
     // the same data as HEADER_BYTES below, but in rust-bitcoin types.
@@ -196,17 +198,17 @@ pub mod block_881423 {
     }
 
     /// Extranonce1 as Extranonce2 type
-    pub static EXTRANONCE1: LazyLock<crate::job_source::Extranonce2> = LazyLock::new(|| {
+    pub static EXTRANONCE1: LazyLock<Extranonce2> = LazyLock::new(|| {
         let bytes = extranonce1_bytes();
         let value = u32::from_le_bytes(bytes.try_into().unwrap());
-        crate::job_source::Extranonce2::new(value as u64, bytes.len() as u8).unwrap()
+        Extranonce2::new(value as u64, bytes.len() as u8).unwrap()
     });
 
     /// Extranonce2 as Extranonce2 type
-    pub static EXTRANONCE2: LazyLock<crate::job_source::Extranonce2> = LazyLock::new(|| {
+    pub static EXTRANONCE2: LazyLock<Extranonce2> = LazyLock::new(|| {
         let bytes = extranonce2_bytes();
         let value = u32::from_le_bytes(bytes.try_into().unwrap());
-        crate::job_source::Extranonce2::new(value as u64, bytes.len() as u8).unwrap()
+        Extranonce2::new(value as u64, bytes.len() as u8).unwrap()
     });
 
     /// Merkle branches as raw byte arrays

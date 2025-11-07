@@ -1,32 +1,42 @@
 use async_trait::async_trait;
 use futures::sink::SinkExt;
-use std::pin::Pin;
-use std::task::{Context, Poll};
-use std::time::Duration;
+use std::{
+    pin::Pin,
+    task::{Context, Poll},
+    time::Duration,
+};
 use tokio::{
     io::{AsyncRead, ReadBuf},
-    sync::watch,
+    sync::{mpsc, watch},
     time,
 };
 use tokio_stream::StreamExt;
 use tokio_util::codec::{FramedRead, FramedWrite};
 
-use crate::asic::bm13xx::{
-    self,
-    protocol::{Command, Hashrate, ReportingInterval, ReportingRate, TicketMask},
-    BM13xxProtocol,
+use crate::{
+    asic::{
+        bm13xx::{
+            self,
+            protocol::{Command, Hashrate, ReportingInterval, ReportingRate, TicketMask},
+            BM13xxProtocol,
+        },
+        ChipInfo, MiningJob, NonceResult,
+    },
+    hash_thread::{bm13xx::BM13xxThread, HashThread},
+    hw_trait::{
+        gpio::{Gpio, GpioPin, PinValue},
+        i2c::I2c,
+    },
+    mgmt_protocol::{bitaxe_raw::i2c::BitaxeRawI2c, BitaxeRawGpio, ControlChannel},
+    peripheral::{
+        emc2101::Emc2101,
+        tps546::{Tps546, Tps546Config},
+    },
+    tracing::prelude::*,
+    transport::serial::{SerialControl, SerialReader, SerialStream, SerialWriter},
 };
-use crate::asic::{ChipInfo, MiningJob};
-use crate::board::{Board, BoardError, BoardEvent, BoardInfo, JobCompleteReason};
-use crate::hash_thread::HashThread;
-use crate::hw_trait::gpio::{Gpio, GpioPin, PinValue};
-use crate::hw_trait::i2c::I2c;
-use crate::mgmt_protocol::bitaxe_raw::i2c::BitaxeRawI2c;
-use crate::mgmt_protocol::{BitaxeRawGpio, ControlChannel};
-use crate::peripheral::emc2101::Emc2101;
-use crate::peripheral::tps546::{Tps546, Tps546Config};
-use crate::tracing::prelude::*;
-use crate::transport::serial::{SerialControl, SerialReader, SerialStream, SerialWriter};
+
+use super::{Board, BoardError, BoardEvent, BoardInfo, JobCompleteReason};
 
 /// Thread removal signal sent via watch channel from board to thread.
 ///
@@ -123,9 +133,9 @@ pub struct BitaxeBoard {
     /// Discovered chip information (passive record-keeping)
     chip_infos: Vec<ChipInfo>,
     /// Channel for sending board events
-    event_tx: Option<tokio::sync::mpsc::Sender<BoardEvent>>,
+    event_tx: Option<mpsc::Sender<BoardEvent>>,
     /// Channel for receiving board events (populated during initialization)
-    event_rx: Option<tokio::sync::mpsc::Receiver<BoardEvent>>,
+    event_rx: Option<mpsc::Receiver<BoardEvent>>,
     /// Current job ID
     current_job_id: Option<u64>,
     /// Job ID counter for chip-internal job tracking (4-bit field: 0-15)
@@ -409,7 +419,7 @@ impl BitaxeBoard {
                                 let core_id = ((nonce >> 25) & 0x7f) as u8;
 
                                 // Send nonce found event
-                                let nonce_result = crate::asic::NonceResult {
+                                let nonce_result = NonceResult {
                                     job_id: job_id as u64,
                                     nonce,
                                     version,
@@ -807,7 +817,7 @@ impl Board for BitaxeBoard {
         Ok(())
     }
 
-    async fn initialize(&mut self) -> Result<tokio::sync::mpsc::Receiver<BoardEvent>, BoardError> {
+    async fn initialize(&mut self) -> Result<mpsc::Receiver<BoardEvent>, BoardError> {
         // Phase 1: Hold ASIC in reset during power configuration
         tracing::info!("Holding ASIC in reset during power initialization");
         self.hold_in_reset().await?;
@@ -1278,8 +1288,7 @@ impl Board for BitaxeBoard {
             ))?;
 
         // Create BM13xxThread with the streams
-        let thread =
-            crate::hash_thread::bm13xx::BM13xxThread::new(data_reader, data_writer, removal_rx);
+        let thread = BM13xxThread::new(data_reader, data_writer, removal_rx);
 
         tracing::info!("Created BM13xx hash thread from BitaxeBoard");
 

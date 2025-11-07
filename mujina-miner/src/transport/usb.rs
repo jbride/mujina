@@ -9,8 +9,7 @@
 //! - **Linux**: Uses udev for device enumeration and hotplug monitoring
 //! - **macOS**: Stub implementation (IOKit support planned for future)
 
-use crate::error::Result;
-use crate::tracing::prelude::*;
+use crate::{error::Result, tracing::prelude::*};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 

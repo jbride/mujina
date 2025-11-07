@@ -4,9 +4,7 @@ use bitcoin::block::Version;
 use bitcoin::hash_types::BlockHash;
 use bitcoin::pow::{CompactTarget, Target};
 
-use super::extranonce2::Extranonce2;
-use super::merkle::MerkleRootKind;
-use super::version::VersionTemplate;
+use super::{Extranonce2, MerkleRootKind, VersionTemplate};
 
 /// Template for mining jobs from any source.
 ///

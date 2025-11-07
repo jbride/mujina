@@ -12,9 +12,11 @@ use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
-use super::messages::{SourceCommand, SourceEvent, SourceHandle};
 use super::test_blocks::block_881423;
-use super::{Extranonce2Range, JobTemplate, MerkleRootKind, MerkleRootTemplate, VersionTemplate};
+use super::{
+    Extranonce2Range, JobTemplate, MerkleRootKind, MerkleRootTemplate, SourceCommand, SourceEvent,
+    SourceHandle, VersionTemplate,
+};
 
 /// Dummy job source that generates work from test block data.
 ///

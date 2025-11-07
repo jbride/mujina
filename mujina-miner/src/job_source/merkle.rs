@@ -6,7 +6,7 @@ use bitcoin::hash_types::TxMerkleNode;
 use bitcoin::hashes::{sha256d, Hash};
 use bitcoin::Transaction;
 
-use super::extranonce2::{Extranonce2, Extranonce2Range};
+use super::{Extranonce2, Extranonce2Range};
 
 /// Specifies how to obtain the merkle root for a mining job.
 ///

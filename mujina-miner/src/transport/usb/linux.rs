@@ -30,9 +30,8 @@
 //! reconnections. This is critical for boards that expect a specific port for
 //! control vs data communication.
 
-use super::{TransportEvent, UsbDeviceInfo};
-use crate::error::Result;
-use crate::tracing::prelude::*;
+use super::{TransportEvent as UsbEvent, UsbDeviceInfo};
+use crate::{error::Result, tracing::prelude::*, transport::TransportEvent};
 use futures::stream::StreamExt;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -237,7 +236,7 @@ impl LinuxUdevDiscovery {
 impl super::UsbDiscoveryImpl for LinuxUdevDiscovery {
     fn monitor_blocking(
         self: Box<Self>,
-        event_tx: mpsc::Sender<super::super::TransportEvent>,
+        event_tx: mpsc::Sender<crate::transport::TransportEvent>,
         shutdown: CancellationToken,
     ) -> Result<()> {
         info!("Starting USB monitoring in dedicated thread");
@@ -262,8 +261,8 @@ impl super::UsbDiscoveryImpl for LinuxUdevDiscovery {
             // Initial enumeration - send Connected events for existing devices
             debug!("Performing initial USB device enumeration");
             for device_info in self.enumerate_devices()? {
-                let usb_event = TransportEvent::UsbDeviceConnected(device_info);
-                let transport_event = super::super::TransportEvent::Usb(usb_event);
+                let usb_event = UsbEvent::UsbDeviceConnected(device_info);
+                let transport_event = TransportEvent::Usb(usb_event);
 
                 if event_tx.send(transport_event).await.is_err() {
                     info!("Event receiver dropped during enumeration");
@@ -324,7 +323,7 @@ impl super::UsbDiscoveryImpl for LinuxUdevDiscovery {
                                             "USB device connected: {:04x}:{:04x} at {}",
                                             device_info.vid, device_info.pid, device_info.device_path
                                         );
-                                        Some(TransportEvent::UsbDeviceConnected(device_info))
+                                        Some(UsbEvent::UsbDeviceConnected(device_info))
                                     }
                                     Err(e) => {
                                         debug!("Failed to build device info for added device: {}", e);
@@ -336,7 +335,7 @@ impl super::UsbDiscoveryImpl for LinuxUdevDiscovery {
                             tokio_udev::EventType::Remove => {
                                 if let Some(syspath) = device.syspath().to_str() {
                                     debug!("USB device removed: {}", syspath);
-                                    Some(TransportEvent::UsbDeviceDisconnected {
+                                    Some(UsbEvent::UsbDeviceDisconnected {
                                         device_path: syspath.to_string(),
                                     })
                                 } else {
@@ -353,7 +352,7 @@ impl super::UsbDiscoveryImpl for LinuxUdevDiscovery {
 
                         // Send the event if we built one
                         if let Some(usb_event) = transport_event {
-                            let transport_event = super::super::TransportEvent::Usb(usb_event);
+                            let transport_event = TransportEvent::Usb(usb_event);
                             if event_tx.send(transport_event).await.is_err() {
                                 info!("Event receiver dropped, exiting USB monitor");
                                 return Ok(());
