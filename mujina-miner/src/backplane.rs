@@ -31,33 +31,6 @@ impl BoardRegistry {
             .filter(|desc| desc.pattern.matches(device))
             .max_by_key(|desc| desc.pattern.specificity())
     }
-
-    /// Create a board from USB device info.
-    pub async fn create_board(&self, device: UsbDeviceInfo) -> Result<Box<dyn Board + Send>> {
-        let desc = self.find_descriptor(&device).ok_or_else(|| {
-            let mfr = device
-                .manufacturer
-                .as_ref()
-                .map(|s| s.as_str())
-                .unwrap_or("None");
-            let prod = device
-                .product
-                .as_ref()
-                .map(|s| s.as_str())
-                .unwrap_or("None");
-            crate::error::Error::Other(format!(
-                "No board registered for VID={:04x} PID={:04x} Manufacturer={} Product={}",
-                device.vid, device.pid, mfr, prod
-            ))
-        })?;
-
-        tracing::debug!(
-            board = desc.name,
-            specificity = desc.pattern.specificity(),
-            "Pattern matched, creating board"
-        );
-        (desc.create_fn)(device).await
-    }
 }
 
 /// Backplane that connects boards to the scheduler.
@@ -108,71 +81,80 @@ impl Backplane {
                 let vid = device_info.vid;
                 let pid = device_info.pid;
 
-                // Try to create a board from this USB device
-                match self.registry.create_board(device_info).await {
-                    Ok(mut board) => {
-                        let board_info = board.board_info();
-                        let board_id = board_info
-                            .serial_number
-                            .clone()
-                            .unwrap_or_else(|| "unknown".to_string());
+                // Check if this device matches any registered board pattern
+                let Some(descriptor) = self.registry.find_descriptor(&device_info) else {
+                    // No match - this is expected for most USB devices
+                    return Ok(());
+                };
 
-                        debug!(
-                            board = %board_info.model,
-                            serial = %board_id,
-                            "Board created, initializing hash threads"
+                // Pattern matched - log the match
+                info!(
+                    board = descriptor.name,
+                    vid = %format!("{:04x}", device_info.vid),
+                    pid = %format!("{:04x}", device_info.pid),
+                    manufacturer = ?device_info.manufacturer,
+                    product = ?device_info.product,
+                    serial = ?device_info.serial_number,
+                    "Matched USB device to hash board"
+                );
+
+                // Create the board using the descriptor's factory function
+                let mut board = match (descriptor.create_fn)(device_info).await {
+                    Ok(board) => board,
+                    Err(e) => {
+                        error!(
+                            board = descriptor.name,
+                            error = %e,
+                            "Failed to create board"
                         );
+                        return Ok(());
+                    }
+                };
 
-                        // Create hash threads from the board
-                        match board.create_hash_threads().await {
-                            Ok(threads) => {
-                                let thread_count = threads.len();
+                let board_info = board.board_info();
+                let board_id = board_info
+                    .serial_number
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string());
 
-                                // Store board for lifecycle management
-                                self.boards.insert(board_id.clone(), board);
+                // Create hash threads from the board
+                match board.create_hash_threads().await {
+                    Ok(threads) => {
+                        let thread_count = threads.len();
 
-                                // Send threads to scheduler
-                                if let Err(e) = self.scheduler_tx.send(threads).await {
-                                    tracing::error!(
-                                        board = %board_info.model,
-                                        error = %e,
-                                        "Failed to send threads to scheduler"
-                                    );
-                                } else {
-                                    // Single consolidated info message - board is ready
-                                    info!(
-                                        board = %board_info.model,
-                                        serial = %board_id,
-                                        threads = thread_count,
-                                        vid = %format!("{:04x}", vid),
-                                        pid = %format!("{:04x}", pid),
-                                        "Board ready"
-                                    );
-                                }
-                            }
-                            Err(e) => {
-                                tracing::error!(
-                                    board = %board_info.model,
-                                    serial = %board_id,
-                                    error = %e,
-                                    "Failed to create hash threads"
-                                );
-                            }
+                        // Store board for lifecycle management
+                        self.boards.insert(board_id.clone(), board);
+
+                        // Send threads to scheduler
+                        if let Err(e) = self.scheduler_tx.send(threads).await {
+                            tracing::error!(
+                                board = %board_info.model,
+                                error = %e,
+                                "Failed to send threads to scheduler"
+                            );
+                        } else {
+                            // Single consolidated info message - board is ready
+                            info!(
+                                board = %board_info.model,
+                                serial = %board_id,
+                                threads = thread_count,
+                                vid = %format!("{:04x}", vid),
+                                pid = %format!("{:04x}", pid),
+                                "Board ready"
+                            );
                         }
                     }
                     Err(e) => {
-                        trace!(
-                            vid = %format!("{:04x}", vid),
-                            pid = %format!("{:04x}", pid),
+                        tracing::error!(
+                            board = %board_info.model,
+                            serial = %board_id,
                             error = %e,
-                            "No board match for USB device"
+                            "Failed to create hash threads"
                         );
                     }
                 }
             }
-            UsbTransportEvent::UsbDeviceDisconnected { device_path } => {
-                debug!(device_path = %device_path, "USB device disconnected");
-
+            UsbTransportEvent::UsbDeviceDisconnected { device_path: _ } => {
                 // Find and shutdown the board
                 // Note: Current design uses serial number as key, but we get device_path
                 // in disconnect event. For single-board setups this works fine.
