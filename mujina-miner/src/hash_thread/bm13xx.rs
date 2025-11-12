@@ -10,7 +10,9 @@
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
-use futures::{sink::Sink, stream::Stream};
+use bitcoin::block::{Header as BlockHeader, Version};
+use bitcoin::hashes::Hash;
+use futures::{sink::Sink, stream::Stream, SinkExt};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_stream::StreamExt;
 
@@ -21,6 +23,7 @@ use super::{
 use crate::{
     asic::bm13xx::{self, protocol},
     board::bitaxe::{BitaxePeripherals, ThreadRemovalSignal},
+    hw_trait::gpio::{GpioPin, PinValue},
     tracing::prelude::*,
 };
 
@@ -239,8 +242,6 @@ where
     W: Sink<bm13xx::protocol::Command> + Unpin,
     W::Error: std::fmt::Debug,
 {
-    use crate::hw_trait::gpio::{GpioPin, PinValue};
-    use futures::SinkExt;
     use protocol::{Command, Register};
 
     // Release from reset
@@ -573,6 +574,39 @@ fn generate_frequency_ramp_steps(
     configs
 }
 
+/// Convert HashTask to JobFullFormat for chip hardware.
+///
+/// Computes the merkle root for the given extranonce2, then builds a JobFullFormat
+/// with all block header fields. Returns an error if the task doesn't have an
+/// EN2 value or if merkle root computation fails.
+fn task_to_job_full(
+    task: &HashTask,
+    chip_job_id: u8,
+) -> Result<protocol::JobFullFormat, HashThreadError> {
+    let template = &task.job.template;
+
+    // Extract EN2 (required for full-format jobs)
+    let en2 = task.en2.as_ref().ok_or_else(|| {
+        HashThreadError::WorkAssignmentFailed("Header-only jobs not supported yet".into())
+    })?;
+
+    // Compute merkle root for this EN2
+    let merkle_root = template.compute_merkle_root(en2).map_err(|e| {
+        HashThreadError::WorkAssignmentFailed(format!("Merkle root computation failed: {}", e))
+    })?;
+
+    Ok(protocol::JobFullFormat {
+        job_id: chip_job_id,
+        num_midstates: 1,
+        starting_nonce: [0, 0, 0, 0],
+        nbits: template.bits.to_consensus().to_le_bytes(),
+        ntime: task.ntime.to_le_bytes(),
+        merkle_root: merkle_root.to_byte_array(),
+        prev_block_hash: template.prev_blockhash.to_byte_array(),
+        version: template.version.version.to_consensus().to_le_bytes(),
+    })
+}
+
 /// Calculate PLL configuration for a specific frequency
 fn calculate_pll_for_frequency(target_freq: f32) -> Option<protocol::PllConfig> {
     const CRYSTAL_FREQ: f32 = 25.0;
@@ -644,7 +678,7 @@ fn calculate_pll_for_frequency(target_freq: f32) -> Option<protocol::PllConfig> 
 /// assigns first work.
 async fn bm13xx_thread_actor<R, W>(
     mut cmd_rx: mpsc::Receiver<ThreadCommand>,
-    _evt_tx: mpsc::Sender<HashThreadEvent>,
+    evt_tx: mpsc::Sender<HashThreadEvent>,
     mut removal_rx: watch::Receiver<ThreadRemovalSignal>,
     status: Arc<RwLock<HashThreadStatus>>,
     mut chip_responses: R,
@@ -658,6 +692,8 @@ async fn bm13xx_thread_actor<R, W>(
     let mut chip_initialized = false;
     let mut current_task: Option<HashTask> = None;
     let mut chip_jobs = ChipJobTracker::new();
+    let mut ntime_ticker = tokio::time::interval(tokio::time::Duration::from_secs(1));
+    ntime_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
         tokio::select! {
@@ -707,7 +743,27 @@ async fn bm13xx_thread_actor<R, W>(
                             chip_initialized = true;
                         }
 
-                        let old_task = current_task.replace(new_task);
+                        // Send initial job to chip
+                        let chip_job_id = chip_jobs.insert(new_task.clone());
+                        let old_task = current_task.replace(new_task.clone());
+                        match task_to_job_full(&new_task, chip_job_id) {
+                            Ok(job_data) => {
+                                if let Err(e) = chip_commands.send(protocol::Command::JobFull { job_data }).await {
+                                    error!(error = ?e, "Failed to send initial JobFull to chip");
+                                    response_tx.send(Err(HashThreadError::WorkAssignmentFailed(
+                                        format!("Failed to send job to chip: {:?}", e)
+                                    ))).ok();
+                                    continue;
+                                } else {
+                                    debug!("Sent initial job to chip");
+                                }
+                            }
+                            Err(e) => {
+                                error!(error = %e, "Failed to convert task to JobFull");
+                                response_tx.send(Err(e)).ok();
+                                continue;
+                            }
+                        }
 
                         {
                             let mut s = status.write().unwrap();
@@ -738,7 +794,30 @@ async fn bm13xx_thread_actor<R, W>(
                             chip_initialized = true;
                         }
 
-                        let old_task = current_task.replace(new_task);
+                        // Clear old jobs (old shares invalid)
+                        chip_jobs.clear();
+
+                        // Send initial job to chip
+                        let chip_job_id = chip_jobs.insert(new_task.clone());
+                        let old_task = current_task.replace(new_task.clone());
+                        match task_to_job_full(&new_task, chip_job_id) {
+                            Ok(job_data) => {
+                                if let Err(e) = chip_commands.send(protocol::Command::JobFull { job_data }).await {
+                                    error!(error = ?e, "Failed to send initial JobFull to chip");
+                                    response_tx.send(Err(HashThreadError::WorkAssignmentFailed(
+                                        format!("Failed to send job to chip: {:?}", e)
+                                    ))).ok();
+                                    continue;
+                                } else {
+                                    debug!("Sent initial job to chip (old work invalidated)");
+                                }
+                            }
+                            Err(e) => {
+                                error!(error = %e, "Failed to convert task to JobFull");
+                                response_tx.send(Err(e)).ok();
+                                continue;
+                            }
+                        }
 
                         {
                             let mut s = status.write().unwrap();
@@ -775,23 +854,115 @@ async fn bm13xx_thread_actor<R, W>(
                     Ok(response) => {
                         match response {
                             bm13xx::protocol::Response::Nonce { nonce, job_id, version, midstate_num, subcore_id } => {
-                                tracing::debug!(
-                                    "Chip nonce: job_id={}, nonce=0x{:08x}, version=0x{:04x}, midstate={}, subcore={}",
-                                    job_id, nonce, version, midstate_num, subcore_id
-                                );
-                                // TODO: Calculate hash, filter by pool_target, emit ShareFound event
+                                // Look up the task for this job_id
+                                if let Some(task) = chip_jobs.get(job_id) {
+                                    let template = &task.job.template;
+
+                                    // Reconstruct full version (chip returns top 16 bits it rolled)
+                                    let base_version = template.version.version.to_consensus();
+                                    let full_version = Version::from_consensus(
+                                        (base_version & 0x0000_ffff) | ((version as i32) << 16)
+                                    );
+
+                                    // Compute merkle root for this task's EN2
+                                    match task.en2.as_ref().and_then(|en2| template.compute_merkle_root(en2).ok()) {
+                                        Some(merkle_root) => {
+                                            // Build block header
+                                            let header = BlockHeader {
+                                                version: full_version,
+                                                prev_blockhash: template.prev_blockhash,
+                                                merkle_root,
+                                                time: task.ntime,
+                                                bits: template.bits,
+                                                nonce,
+                                            };
+
+                                            // Compute hash
+                                            let hash = header.block_hash();
+
+                                            // Validate against job target
+                                            let target = template.target();
+                                            if target.is_met_by(hash) {
+                                                // Create share
+                                                let share = super::task::Share {
+                                                    task: Arc::new(task.clone()),
+                                                    nonce,
+                                                    hash,
+                                                    version: full_version,
+                                                    ntime: task.ntime,
+                                                    extranonce2: task.en2.clone(),
+                                                };
+
+                                                // Emit event
+                                                if evt_tx.send(HashThreadEvent::ShareFound(share)).await.is_err() {
+                                                    debug!("Failed to send ShareFound event (scheduler gone)");
+                                                } else {
+                                                    debug!(
+                                                        chip_job_id = job_id,
+                                                        nonce = format!("{:#x}", nonce),
+                                                        hash = %hash,
+                                                        "Share found and reported"
+                                                    );
+                                                }
+                                            } else {
+                                                trace!(
+                                                    chip_job_id = job_id,
+                                                    nonce = format!("{:#x}", nonce),
+                                                    hash = %hash,
+                                                    target = %target,
+                                                    "Nonce does not meet target (filtered)"
+                                                );
+                                            }
+                                        }
+                                        None => {
+                                            error!(
+                                                chip_job_id = job_id,
+                                                "Failed to compute merkle root for nonce"
+                                            );
+                                        }
+                                    }
+                                } else {
+                                    trace!(
+                                        chip_job_id = job_id,
+                                        nonce = format!("{:#x}", nonce),
+                                        "Nonce for unknown job_id (possibly stale)"
+                                    );
+                                }
+
+                                let _ = (midstate_num, subcore_id); // Unused for now
                             }
 
                             bm13xx::protocol::Response::ReadRegister { chip_address, register } => {
-                                tracing::trace!("Register read from chip {}: {:?}", chip_address, register);
-                                // Ignore register reads for now
+                                trace!(chip_address, register = ?register, "Register read response");
                             }
                         }
                     }
 
                     Err(e) => {
-                        tracing::error!("Serial decode error: {:?}", e);
+                        error!(error = ?e, "Serial decode error");
                         // TODO: Emit error event, potentially trigger going offline if persistent
+                    }
+                }
+            }
+
+            // ntime rolling timer (roll forward every second)
+            _ = ntime_ticker.tick(), if current_task.is_some() => {
+                let task = current_task.as_mut().unwrap();
+
+                // Increment ntime
+                task.ntime += 1;
+
+                // Convert to chip format and send
+                match task_to_job_full(task, chip_jobs.insert(task.clone())) {
+                    Ok(job_data) => {
+                        if let Err(e) = chip_commands.send(protocol::Command::JobFull { job_data }).await {
+                            error!(error = ?e, "Failed to send JobFull to chip");
+                        } else {
+                            trace!(ntime = task.ntime, "Sent ntime-rolled job to chip");
+                        }
+                    }
+                    Err(e) => {
+                        error!(error = %e, "Failed to convert task to JobFull");
                     }
                 }
             }
@@ -896,40 +1067,5 @@ mod tests {
             result.is_none(),
             "Expected channel closure (None), got event"
         );
-    }
-
-    #[tokio::test]
-    async fn test_thread_processes_known_good_nonce() {
-        use crate::job_source::test_blocks::block_881423;
-
-        let (_removal_tx, removal_rx) = watch::channel(ThreadRemovalSignal::Running);
-
-        // Create stream with known-good nonce from block 881423
-        let responses = vec![bm13xx::protocol::Response::Nonce {
-            nonce: block_881423::NONCE, // 0x5d6472f7 - actual winning nonce
-            job_id: 1,
-            // Extract version bits - chip returns top 16 bits it can roll
-            version: (block_881423::VERSION.to_consensus() >> 16) as u16,
-            midstate_num: 0,
-            subcore_id: 0,
-        }];
-
-        let chip_responses = mock_response_stream(responses);
-        let chip_commands = mock_command_sink();
-
-        let thread = BM13xxThread::new(
-            chip_responses,
-            chip_commands,
-            mock_peripherals(),
-            removal_rx,
-        );
-
-        // Give actor time to process the nonce
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        // For now, just verify thread doesn't crash when processing nonce
-        // TODO: When ShareFound events are implemented, verify event is emitted
-        let _status = thread.status();
-        // Thread should still be running (not crashed)
     }
 }

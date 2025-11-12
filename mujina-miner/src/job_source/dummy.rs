@@ -108,6 +108,12 @@ impl DummySource {
     pub async fn run(mut self) -> Result<()> {
         info!("Dummy source starting");
 
+        // Send initial job immediately
+        debug!(job_id = %self.job_template.id, "Emitting initial job");
+        self.event_tx
+            .send(SourceEvent::UpdateJob(self.job_template.clone()))
+            .await?;
+
         loop {
             tokio::select! {
                 _ = tokio::time::sleep(self.interval) => {
@@ -189,7 +195,7 @@ mod tests {
     #[test]
     fn test_dummy_job_produces_valid_block_hash() {
         let (event_tx, _event_rx) = mpsc::channel(10);
-        let (command_tx, command_rx) = mpsc::channel(10);
+        let (_command_tx, command_rx) = mpsc::channel(10);
         let shutdown = CancellationToken::new();
 
         let dummy = DummySource::new(command_rx, event_tx, shutdown, Duration::from_secs(30))

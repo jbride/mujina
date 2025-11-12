@@ -278,7 +278,31 @@ pub async fn task(
                         );
                         stats.nonces_found += 1;
                         stats.valid_nonces += 1;
-                        // TODO: Verify share and submit to pool
+
+                        // Submit share to originating source
+                        let source_id = share.task.job.source_id;
+                        if let Some(source) = sources.get(source_id) {
+                            use crate::job_source::Share as SourceShare;
+                            let source_share = SourceShare {
+                                job_id: share.task.job.template.id.clone(),
+                                nonce: share.nonce,
+                                time: share.ntime,
+                                version: share.version,
+                                extranonce2: share.extranonce2,
+                            };
+
+                            if let Err(e) = source.command_tx.send(SourceCommand::SubmitShare(source_share)).await {
+                                error!(
+                                    source_id = ?source_id,
+                                    error = %e,
+                                    "Failed to submit share to source"
+                                );
+                            } else {
+                                debug!(source = %source.name, "Share submitted to source");
+                            }
+                        } else {
+                            error!(source_id = ?source_id, "Share for unknown source");
+                        }
                     }
 
                     HashThreadEvent::WorkExhausted { en2_searched } => {
@@ -327,7 +351,6 @@ pub async fn task(
 struct MiningStats {
     nonces_found: u64,
     valid_nonces: u64,
-    invalid_nonces: u64,
     jobs_completed: u64,
     start_time: std::time::Instant,
     difficulty: f64,
@@ -339,10 +362,8 @@ impl Default for MiningStats {
         Self {
             nonces_found: 0,
             valid_nonces: 0,
-            invalid_nonces: 0,
             jobs_completed: 0,
             start_time: now,
-
             difficulty: 1.0,
         }
     }
@@ -371,7 +392,6 @@ impl MiningStats {
             nonces_found = self.nonces_found,
             valid = self.valid_nonces,
             valid_pct = format!("{:.2}", valid_pct),
-            invalid = self.invalid_nonces,
             jobs_completed = self.jobs_completed,
             "Mining statistics"
         );
