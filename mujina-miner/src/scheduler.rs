@@ -1,18 +1,29 @@
 //! The scheduler module manages the distribution of mining jobs to hash boards
 //! and ASIC chips.
 //!
-//! # Share Filtering
+//! # Share Filtering (Three-Layer Architecture)
 //!
-//! The scheduler receives ALL shares from HashThreads and performs final
-//! filtering before forwarding to JobSources:
+//! Share filtering happens at three independent levels:
 //!
-//! - HashThreads forward all chip shares (hash already computed)
-//! - Scheduler filters by job target (only pool-worthy shares submitted)
-//! - Scheduler uses all shares for per-thread hashrate measurement
-//! - Scheduler tracks chip health across all threads
+//! **Layer 1 - Chip TicketMask (hardware pre-filter):**
+//! - Configured by thread during initialization
+//! - Chip only reports nonces meeting this threshold
+//! - Set for frequent health signals (~1/sec at current hashrate)
 //!
-//! This centralized filtering provides accurate monitoring while keeping
-//! thread implementations simple.
+//! **Layer 2 - HashTask.share_target (thread-to-scheduler filter):**
+//! - Configured by scheduler when assigning work
+//! - Thread validates and emits ShareFound only for shares meeting this
+//! - Controls message volume to scheduler
+//! - Allows per-thread difficulty adjustment
+//!
+//! **Layer 3 - JobTemplate.share_target (scheduler-to-source filter):**
+//! - Set by pool via Stratum mining.set_difficulty
+//! - Scheduler validates before forwarding to source
+//! - Only pool-worthy shares submitted
+//!
+//! The scheduler receives shares meeting HashTask.share_target, uses them for
+//! statistics and monitoring, then filters again before pool submission. This
+//! provides accurate per-thread metrics while controlling network traffic.
 //!
 //! This is a work-in-progress. It's currently the main and initial place where
 //! functionality is added, after which the functionality is refactored out to
@@ -188,6 +199,7 @@ pub async fn task(
                                 job: active_job.clone(),
                                 en2_range: Some(en2_range),
                                 en2: starting_en2,
+                                share_target: active_job.template.share_target,
                                 ntime: active_job.template.time,
                             };
 
@@ -233,6 +245,7 @@ pub async fn task(
                                 job: active_job.clone(),
                                 en2_range: Some(en2_range),
                                 en2: starting_en2,
+                                share_target: active_job.template.share_target,
                                 ntime: active_job.template.time,
                             };
 
@@ -277,31 +290,43 @@ pub async fn task(
                             "Share found"
                         );
                         stats.nonces_found += 1;
-                        stats.valid_nonces += 1;
 
-                        // Submit share to originating source
+                        // Check if share meets source threshold
                         let source_id = share.task.job.source_id;
-                        if let Some(source) = sources.get(source_id) {
-                            use crate::job_source::Share as SourceShare;
-                            let source_share = SourceShare {
-                                job_id: share.task.job.template.id.clone(),
-                                nonce: share.nonce,
-                                time: share.ntime,
-                                version: share.version,
-                                extranonce2: share.extranonce2,
-                            };
+                        let template = &share.task.job.template;
 
-                            if let Err(e) = source.command_tx.send(SourceCommand::SubmitShare(source_share)).await {
-                                error!(
-                                    source_id = ?source_id,
-                                    error = %e,
-                                    "Failed to submit share to source"
-                                );
+                        if template.share_target.is_met_by(share.hash) {
+                            stats.valid_nonces += 1;
+
+                            // Submit share to originating source
+                            if let Some(source) = sources.get(source_id) {
+                                use crate::job_source::Share as SourceShare;
+                                let source_share = SourceShare {
+                                    job_id: template.id.clone(),
+                                    nonce: share.nonce,
+                                    time: share.ntime,
+                                    version: share.version,
+                                    extranonce2: share.extranonce2,
+                                };
+
+                                if let Err(e) = source.command_tx.send(SourceCommand::SubmitShare(source_share)).await {
+                                    error!(
+                                        source_id = ?source_id,
+                                        error = %e,
+                                        "Failed to submit share to source"
+                                    );
+                                } else {
+                                    debug!(source = %source.name, "Share submitted to source");
+                                }
                             } else {
-                                debug!(source = %source.name, "Share submitted to source");
+                                error!(source_id = ?source_id, "Share for unknown source");
                             }
                         } else {
-                            error!(source_id = ?source_id, "Share for unknown source");
+                            trace!(
+                                thread_id = ?thread_id,
+                                nonce = format!("{:#x}", share.nonce),
+                                "Share below source threshold (not submitted)"
+                            );
                         }
                     }
 

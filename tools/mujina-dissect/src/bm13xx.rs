@@ -15,7 +15,10 @@ use bytes::{Buf, BytesMut};
 use mujina_miner::asic::bm13xx::{
     crc::{crc16, crc5},
     error::ProtocolError,
-    protocol::{Command, FrameCodec, JobFullFormat, Register, RegisterAddress, Response},
+    protocol::{
+        hash_from_wire_bytes, Command, FrameCodec, JobFullFormat, Register, RegisterAddress,
+        Response,
+    },
 };
 use std::collections::VecDeque;
 use tokio_util::codec::Decoder;
@@ -357,16 +360,42 @@ fn parse_bm13xx_command_frame(data: &[u8]) -> Result<Command, ProtocolError> {
         // Parse work frame (JobFull)
         let job_data_len = _length - 4;
         if job_data_len == 82 && data.len() >= 2 + _length {
+            use bitcoin::hashes::Hash;
+
             let job_data_bytes = &data[4..(4 + 82)];
+
+            // Extract job_id from job_header (shift right 3 to get 4-bit value)
+            let job_id = job_data_bytes[0] >> 3;
+
+            // Parse wire bytes to Bitcoin types
+            let starting_nonce = u32::from_le_bytes(job_data_bytes[2..6].try_into().unwrap());
+            let nbits = bitcoin::CompactTarget::from_consensus(u32::from_le_bytes(
+                job_data_bytes[6..10].try_into().unwrap(),
+            ));
+            let ntime = u32::from_le_bytes(job_data_bytes[10..14].try_into().unwrap());
+
+            // Convert hashes from wire format (word-swapped) to Bitcoin internal format
+            let merkle_wire: [u8; 32] = job_data_bytes[14..46].try_into().unwrap();
+            let merkle_internal = hash_from_wire_bytes(&merkle_wire);
+            let merkle_root = bitcoin::hash_types::TxMerkleNode::from_byte_array(merkle_internal);
+
+            let prev_hash_wire: [u8; 32] = job_data_bytes[46..78].try_into().unwrap();
+            let prev_hash_internal = hash_from_wire_bytes(&prev_hash_wire);
+            let prev_block_hash = bitcoin::BlockHash::from_byte_array(prev_hash_internal);
+
+            let version = bitcoin::block::Version::from_consensus(u32::from_le_bytes(
+                job_data_bytes[78..82].try_into().unwrap(),
+            ) as i32);
+
             let job_data = JobFullFormat {
-                job_id: job_data_bytes[0],
+                job_id,
                 num_midstates: job_data_bytes[1],
-                starting_nonce: job_data_bytes[2..6].try_into().unwrap(),
-                nbits: job_data_bytes[6..10].try_into().unwrap(),
-                ntime: job_data_bytes[10..14].try_into().unwrap(),
-                merkle_root: job_data_bytes[14..46].try_into().unwrap(),
-                prev_block_hash: job_data_bytes[46..78].try_into().unwrap(),
-                version: job_data_bytes[78..82].try_into().unwrap(),
+                starting_nonce,
+                nbits,
+                ntime,
+                merkle_root,
+                prev_block_hash,
+                version,
             };
             return Ok(Command::JobFull { job_data });
         } else {

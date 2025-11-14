@@ -11,7 +11,6 @@ use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use bitcoin::block::{Header as BlockHeader, Version};
-use bitcoin::hashes::Hash;
 use futures::{sink::Sink, stream::Stream, SinkExt};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_stream::StreamExt;
@@ -347,9 +346,10 @@ where
         })?;
 
     // Ticket mask, IO strength
+    // Target: ~1 nonce per second at 1 TH/s (1000 GiH/s = 1.074 TH/s)
     use protocol::{Hashrate, ReportingInterval, ReportingRate, TicketMask};
     let reporting_interval = ReportingInterval::from_rate(
-        Hashrate::gibihashes_per_sec(1024.0),
+        Hashrate::gibihashes_per_sec(1000.0),
         ReportingRate::nonces_per_sec(1.0),
     );
     let ticket_mask = TicketMask::new(reporting_interval);
@@ -577,34 +577,47 @@ fn generate_frequency_ramp_steps(
 
 /// Convert HashTask to JobFullFormat for chip hardware.
 ///
-/// Computes the merkle root for the given extranonce2, then builds a JobFullFormat
-/// with all block header fields. Returns an error if the task doesn't have an
-/// EN2 value or if merkle root computation fails.
+/// Extracts or computes the merkle root, then builds a JobFullFormat with all
+/// block header fields. For computed merkle roots, requires EN2. For fixed merkle
+/// roots (Stratum v2 header-only), uses the template's fixed value directly.
 fn task_to_job_full(
     task: &HashTask,
     chip_job_id: u8,
 ) -> Result<protocol::JobFullFormat, HashThreadError> {
+    use crate::job_source::MerkleRootKind; // TODO: move import
+
     let template = &task.job.template;
 
-    // Extract EN2 (required for full-format jobs)
-    let en2 = task.en2.as_ref().ok_or_else(|| {
-        HashThreadError::WorkAssignmentFailed("Header-only jobs not supported yet".into())
-    })?;
+    // Get merkle root (computed or fixed)
+    let merkle_root = match &template.merkle_root {
+        MerkleRootKind::Computed(_) => {
+            // Extract EN2 (required for computed merkle roots)
+            let en2 = task.en2.as_ref().ok_or_else(|| {
+                HashThreadError::WorkAssignmentFailed(
+                    "EN2 required for computed merkle root".into(),
+                )
+            })?;
 
-    // Compute merkle root for this EN2
-    let merkle_root = template.compute_merkle_root(en2).map_err(|e| {
-        HashThreadError::WorkAssignmentFailed(format!("Merkle root computation failed: {}", e))
-    })?;
+            // Compute merkle root for this EN2
+            template.compute_merkle_root(en2).map_err(|e| {
+                HashThreadError::WorkAssignmentFailed(format!(
+                    "Merkle root computation failed: {}",
+                    e
+                ))
+            })?
+        }
+        MerkleRootKind::Fixed(merkle_root) => *merkle_root,
+    };
 
     Ok(protocol::JobFullFormat {
         job_id: chip_job_id,
         num_midstates: 1,
-        starting_nonce: [0, 0, 0, 0],
-        nbits: template.bits.to_consensus().to_le_bytes(),
-        ntime: task.ntime.to_le_bytes(),
-        merkle_root: merkle_root.to_byte_array(),
-        prev_block_hash: template.prev_blockhash.to_byte_array(),
-        version: template.version.version.to_consensus().to_le_bytes(),
+        starting_nonce: 0,
+        nbits: template.bits,
+        ntime: task.ntime,
+        merkle_root,
+        prev_block_hash: template.prev_blockhash,
+        version: template.version.version,
     })
 }
 
@@ -859,11 +872,10 @@ async fn bm13xx_thread_actor<R, W>(
                                 if let Some(task) = chip_jobs.get(job_id) {
                                     let template = &task.job.template;
 
-                                    // Reconstruct full version (chip returns top 16 bits it rolled)
+                                    // Reconstruct full version (chip returns version bits to shift left 13)
                                     let base_version = template.version.version.to_consensus();
-                                    let full_version = Version::from_consensus(
-                                        (base_version & 0x0000_ffff) | ((version as i32) << 16)
-                                    );
+                                    let full_version =
+                                        Version::from_consensus(base_version | ((version as i32) << 13));
 
                                     // Compute merkle root for this task's EN2
                                     match task.en2.as_ref().and_then(|en2| template.compute_merkle_root(en2).ok()) {
@@ -881,9 +893,8 @@ async fn bm13xx_thread_actor<R, W>(
                                             // Compute hash
                                             let hash = header.block_hash();
 
-                                            // Validate against job target
-                                            let target = template.target();
-                                            if target.is_met_by(hash) {
+                                            // Validate against task share target
+                                            if task.share_target.is_met_by(hash) {
                                                 // Create share
                                                 let share = super::task::Share {
                                                     task: Arc::new(task.clone()),
@@ -909,8 +920,9 @@ async fn bm13xx_thread_actor<R, W>(
                                                 trace!(
                                                     chip_job_id = job_id,
                                                     nonce = format!("{:#x}", nonce),
+                                                    hash = %hash,
                                                     hash_diff = %DisplayDifficulty::from_hash(&hash),
-                                                    target_diff = %DisplayDifficulty::from_target(&target),
+                                                    target_diff = %DisplayDifficulty::from_target(&task.share_target),
                                                     "Nonce does not meet target (filtered)"
                                                 );
                                             }
@@ -1068,5 +1080,57 @@ mod tests {
             result.is_none(),
             "Expected channel closure (None), got event"
         );
+    }
+
+    #[test]
+    fn test_task_to_job_full_converts_high_level_types() {
+        use crate::asic::bm13xx::test_data::esp_miner_job;
+        use crate::job_source::{Extranonce2, JobTemplate, MerkleRootKind, VersionTemplate};
+        use crate::scheduler::ActiveJob;
+
+        // Create a JobTemplate with test data values
+        // Use MerkleRootKind::Fixed with the exact merkle_root from capture
+        let template = JobTemplate {
+            id: "test".into(),
+            prev_blockhash: *esp_miner_job::wire_tx::PREV_BLOCKHASH,
+            version: VersionTemplate {
+                version: *esp_miner_job::wire_tx::VERSION,
+                mask: Some(0xFFFF0000),
+            },
+            bits: *esp_miner_job::wire_tx::NBITS,
+            share_target: crate::job_source::job::difficulty_to_target(100),
+            time: *esp_miner_job::wire_tx::NTIME,
+            merkle_root: MerkleRootKind::Fixed(*esp_miner_job::wire_tx::MERKLE_ROOT),
+        };
+
+        // Dummy EN2 (doesn't matter since we're using Fixed merkle root)
+        let dummy_en2 = Extranonce2::new(0, 1).unwrap();
+
+        let task = HashTask {
+            job: Arc::new(ActiveJob {
+                source_id: slotmap::DefaultKey::default(),
+                template,
+            }),
+            en2_range: None,
+            en2: Some(dummy_en2),
+            share_target: crate::job_source::job::difficulty_to_target(100),
+            ntime: *esp_miner_job::wire_tx::NTIME,
+        };
+
+        // Convert to JobFullFormat
+        let result = task_to_job_full(&task, *esp_miner_job::wire_tx::JOB_ID).unwrap();
+
+        // Verify all fields match expected Bitcoin types
+        assert_eq!(result.job_id, *esp_miner_job::wire_tx::JOB_ID);
+        assert_eq!(result.num_midstates, 1);
+        assert_eq!(result.starting_nonce, 0);
+        assert_eq!(result.nbits, *esp_miner_job::wire_tx::NBITS);
+        assert_eq!(result.ntime, *esp_miner_job::wire_tx::NTIME);
+        assert_eq!(result.version, *esp_miner_job::wire_tx::VERSION);
+        assert_eq!(
+            result.prev_block_hash,
+            *esp_miner_job::wire_tx::PREV_BLOCKHASH
+        );
+        assert_eq!(result.merkle_root, *esp_miner_job::wire_tx::MERKLE_ROOT);
     }
 }

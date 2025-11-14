@@ -5,21 +5,26 @@
 //! without needing to know about the underlying hardware topology (single chip,
 //! chip chain, engine groups, etc.).
 //!
-//! # Share Processing
+//! # Share Processing (Three-Layer Filtering)
 //!
-//! HashThreads forward ALL shares from chips to the scheduler:
+//! Share filtering happens at three independent levels:
 //!
-//! 1. Chips are configured with low difficulty targets (e.g., diff 100-1000)
-//!    for frequent health signals
-//! 2. Thread computes hash for every chip share (required to determine
-//!    what difficulty it meets)
-//! 3. Thread forwards all shares via ShareFound events (since hash is already
-//!    computed, filtering is trivial)
-//! 4. Scheduler performs final filtering against job target
+//! 1. **Chip TicketMask (hardware pre-filter):**
+//!    Thread configures chip with low difficulty for frequent health signals.
+//!    Chip only reports nonces meeting this hardware threshold.
 //!
-//! This design keeps thread implementation simple, provides scheduler with
-//! ground truth for per-thread hashrate, and centralizes filtering logic.
-//! Message volume is manageable: ~1-2 shares/sec per chip at typical targets.
+//! 2. **HashTask.share_target (thread-to-scheduler filter):**
+//!    Scheduler sets when assigning work. Thread computes hash for every chip
+//!    nonce and emits ShareFound only for shares meeting task.share_target.
+//!    Controls message volume to scheduler.
+//!
+//! 3. **JobTemplate.share_target (scheduler-to-source filter):**
+//!    Scheduler performs final filtering before pool submission. Only shares
+//!    meeting this threshold are forwarded to the source.
+//!
+//! This provides scheduler with frequent monitoring data (task.share_target)
+//! while limiting pool submissions (template.share_target). Message volume
+//! is manageable: ~1-2 shares/sec to scheduler, fewer to pool.
 
 pub mod bm13xx;
 pub mod task;

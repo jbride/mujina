@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use bitcoin::block::Version;
+use bitcoin::pow::Target;
 use bitcoin::BlockHash;
 
 use crate::job_source::{Extranonce2, Extranonce2Range};
@@ -35,6 +36,13 @@ pub struct HashTask {
     /// When stored as snapshot: the EN2 value that was used.
     /// None for header-only mining (Stratum v2).
     pub en2: Option<Extranonce2>,
+
+    /// Share target for thread-to-scheduler submission threshold.
+    ///
+    /// Thread emits ShareFound only for shares meeting this target. Allows
+    /// scheduler to control message volume independently from pool submission
+    /// difficulty. Typically set easier than source threshold for monitoring.
+    pub share_target: Target,
 
     /// Current ntime value
     ///

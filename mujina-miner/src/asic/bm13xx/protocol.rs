@@ -9,6 +9,7 @@
 //! - Consider shared frame validation traits/interfaces
 //! - Unify endianness handling across different frame types
 
+use bitcoin::hashes::Hash;
 use bitvec::prelude::*;
 use bytes::{Buf, BufMut, BytesMut};
 use std::{fmt, io};
@@ -804,6 +805,42 @@ enum CommandFlagsCmd {
     ChainInactive = 3,
 }
 
+/// Convert Bitcoin internal hash format to BM13xx wire format.
+///
+/// Bitcoin uses little-endian 32-byte hashes internally. The BM13xx wire
+/// protocol expects these hashes with 4-byte words reversed:
+/// - Split the 32 bytes into 8 4-byte words
+/// - Reverse word order (word 0 with 7, 1 with 6, 2 with 5, 3 with 4)
+///
+/// Example:
+/// Internal: [w0_byte0, w0_byte1, w0_byte2, w0_byte3, w1_..., w7_byte3]
+/// Wire:     [w7_byte0, w7_byte1, w7_byte2, w7_byte3, w6_..., w0_byte3]
+pub fn hash_to_wire_bytes(hash: &[u8; 32]) -> [u8; 32] {
+    let mut wire_bytes = [0u8; 32];
+    // Reverse the order of 4-byte words
+    for i in 0..8 {
+        let src_word = &hash[i * 4..(i + 1) * 4];
+        let dst_word = &mut wire_bytes[(7 - i) * 4..(8 - i) * 4];
+        dst_word.copy_from_slice(src_word);
+    }
+    wire_bytes
+}
+
+/// Convert BM13xx wire format to Bitcoin internal hash format.
+///
+/// Inverse of `hash_to_wire_bytes`. Takes wire bytes and reverses the 4-byte
+/// word order to produce Bitcoin's internal little-endian format.
+pub fn hash_from_wire_bytes(wire_bytes: &[u8; 32]) -> [u8; 32] {
+    let mut hash = [0u8; 32];
+    // Reverse the order of 4-byte words
+    for i in 0..8 {
+        let src_word = &wire_bytes[i * 4..(i + 1) * 4];
+        let dst_word = &mut hash[(7 - i) * 4..(8 - i) * 4];
+        dst_word.copy_from_slice(src_word);
+    }
+    hash
+}
+
 #[derive(Debug)]
 pub enum Command {
     /// Assign an address to the first unaddressed chip via daisy-chain forwarding
@@ -830,24 +867,32 @@ pub enum Command {
     JobMidstate { job_data: JobMidstateFormat },
 }
 
-/// Full format job structure (BM1370/BM1362).
+/// Full format job structure
+///
 /// The chip calculates midstates internally from the full block header.
-/// All multi-byte values are little-endian in the structure.
-/// Hash values (merkle_root, prev_block_hash) are stored in big-endian format.
+/// This structure uses Bitcoin types internally; conversion to/from wire format
+/// happens during encoding/decoding.
 #[derive(Debug, Clone)]
 pub struct JobFullFormat {
     /// 4-bit job identifier (0-15), encoded into bits 6-3 of job_header on wire
     pub job_id: u8,
-    pub num_midstates: u8, // Typically 0x01 for BM1370
-    pub starting_nonce: [u8; 4],
-    pub nbits: [u8; 4],            // Difficulty target
-    pub ntime: [u8; 4],            // Timestamp
-    pub merkle_root: [u8; 32],     // Full merkle root (big-endian)
-    pub prev_block_hash: [u8; 32], // Full previous block hash (big-endian)
-    pub version: [u8; 4],          // Block version for version rolling
+    /// Number of midstates (typically 0x01 for BM1370)
+    pub num_midstates: u8,
+    /// Starting nonce value (typically 0x00000000)
+    pub starting_nonce: u32,
+    /// Encoded difficulty target
+    pub nbits: bitcoin::CompactTarget,
+    /// Block timestamp (Unix time)
+    pub ntime: u32,
+    /// Transaction merkle tree root
+    pub merkle_root: bitcoin::hash_types::TxMerkleNode,
+    /// Previous block hash
+    pub prev_block_hash: bitcoin::BlockHash,
+    /// Block version (base version, chip may roll additional bits)
+    pub version: bitcoin::block::Version,
 }
 
-/// Midstate format job structure (BM1397).
+/// Midstate format job structure (BM1397?).
 /// Host pre-calculates SHA256 midstates to reduce chip workload.
 /// Supports up to 4 midstates for version rolling.
 #[derive(Debug, Clone)]
@@ -986,12 +1031,19 @@ impl Command {
                 debug_assert!(job_data.job_id <= 15, "job_id must be 0-15");
                 dst.put_u8(job_data.job_id << 3);
                 dst.put_u8(job_data.num_midstates);
-                dst.put_slice(&job_data.starting_nonce);
-                dst.put_slice(&job_data.nbits);
-                dst.put_slice(&job_data.ntime);
-                dst.put_slice(&job_data.merkle_root);
-                dst.put_slice(&job_data.prev_block_hash);
-                dst.put_slice(&job_data.version);
+                dst.put_u32_le(job_data.starting_nonce);
+                dst.put_u32_le(job_data.nbits.to_consensus());
+                dst.put_u32_le(job_data.ntime);
+
+                // Convert merkle_root from Bitcoin internal format to wire format
+                let merkle_root_bytes = hash_to_wire_bytes(&job_data.merkle_root.to_byte_array());
+                dst.put_slice(&merkle_root_bytes);
+
+                // Convert prev_block_hash from Bitcoin internal format to wire format
+                let prev_hash_bytes = hash_to_wire_bytes(&job_data.prev_block_hash.to_byte_array());
+                dst.put_slice(&prev_hash_bytes);
+
+                dst.put_u32_le(job_data.version.to_consensus() as u32);
             }
             Command::JobMidstate { job_data } => {
                 dst.put_u8(Self::build_flags(
@@ -1096,6 +1148,7 @@ impl Response {
                 let nonce = bytes.get_u32_le();
                 let midstate_num = bytes.get_u8();
                 let result_header = bytes.get_u8();
+                // Version rolling field (16 bits to shift left 13 and OR with base version)
                 let version = bytes.get_u16_le();
                 // CRC already consumed
 
@@ -1699,16 +1752,42 @@ mod command_tests {
 
     #[test]
     fn job_full_format_encoding() {
-        // Test BM1370 job packet encoding
+        use bitcoin::CompactTarget;
+
+        // Test BM1370 job packet encoding with patterns that verify word-swapping
+        // Use sequential bytes so we can verify word reversal
+        // Internal format: [w0, w1, w2, w3, w4, w5, w6, w7] (each word is 4 bytes)
+        // Wire format: [w7, w6, w5, w4, w3, w2, w1, w0]
+        let merkle_internal = [
+            0x00, 0x01, 0x02, 0x03, // word 0
+            0x04, 0x05, 0x06, 0x07, // word 1
+            0x08, 0x09, 0x0a, 0x0b, // word 2
+            0x0c, 0x0d, 0x0e, 0x0f, // word 3
+            0x10, 0x11, 0x12, 0x13, // word 4
+            0x14, 0x15, 0x16, 0x17, // word 5
+            0x18, 0x19, 0x1a, 0x1b, // word 6
+            0x1c, 0x1d, 0x1e, 0x1f, // word 7
+        ];
+        let prev_hash_internal = [
+            0x20, 0x21, 0x22, 0x23, // word 0
+            0x24, 0x25, 0x26, 0x27, // word 1
+            0x28, 0x29, 0x2a, 0x2b, // word 2
+            0x2c, 0x2d, 0x2e, 0x2f, // word 3
+            0x30, 0x31, 0x32, 0x33, // word 4
+            0x34, 0x35, 0x36, 0x37, // word 5
+            0x38, 0x39, 0x3a, 0x3b, // word 6
+            0x3c, 0x3d, 0x3e, 0x3f, // word 7
+        ];
+
         let job = JobFullFormat {
             job_id: 0x00,
             num_midstates: 0x01,
-            starting_nonce: [0x00, 0x00, 0x00, 0x00],
-            nbits: [0x17, 0x0e, 0xd6, 0x6a],
-            ntime: [0x66, 0x73, 0x8c, 0x20],
-            merkle_root: [0xaa; 32],           // Simple test pattern
-            prev_block_hash: [0xbb; 32],       // Simple test pattern
-            version: [0x00, 0x00, 0x00, 0x20], // Version 32
+            starting_nonce: 0x00000000,
+            nbits: CompactTarget::from_consensus(0x6ad60e17),
+            ntime: 0x208c7366,
+            merkle_root: bitcoin::hash_types::TxMerkleNode::from_byte_array(merkle_internal),
+            prev_block_hash: bitcoin::BlockHash::from_byte_array(prev_hash_internal),
+            version: bitcoin::block::Version::from_consensus(0x20000000),
         };
 
         let mut codec = FrameCodec::default();
@@ -1728,12 +1807,37 @@ mod command_tests {
         assert_eq!(frame[3], 86); // Total length
         assert_eq!(frame[4], job.job_id);
         assert_eq!(frame[5], job.num_midstates);
-        assert_eq!(&frame[6..10], &job.starting_nonce);
-        assert_eq!(&frame[10..14], &job.nbits);
-        assert_eq!(&frame[14..18], &job.ntime);
-        assert_eq!(&frame[18..50], &job.merkle_root);
-        assert_eq!(&frame[50..82], &job.prev_block_hash);
-        assert_eq!(&frame[82..86], &job.version);
+        assert_eq!(&frame[6..10], &job.starting_nonce.to_le_bytes());
+        assert_eq!(&frame[10..14], &job.nbits.to_consensus().to_le_bytes());
+        assert_eq!(&frame[14..18], &job.ntime.to_le_bytes());
+
+        // Verify merkle_root word-swapping: wire should have word 7 first, then 6, etc.
+        let expected_merkle_wire = [
+            0x1c, 0x1d, 0x1e, 0x1f, // word 7 (was last)
+            0x18, 0x19, 0x1a, 0x1b, // word 6
+            0x14, 0x15, 0x16, 0x17, // word 5
+            0x10, 0x11, 0x12, 0x13, // word 4
+            0x0c, 0x0d, 0x0e, 0x0f, // word 3
+            0x08, 0x09, 0x0a, 0x0b, // word 2
+            0x04, 0x05, 0x06, 0x07, // word 1
+            0x00, 0x01, 0x02, 0x03, // word 0 (was first)
+        ];
+        assert_eq!(&frame[18..50], &expected_merkle_wire);
+
+        // Verify prev_block_hash word-swapping
+        let expected_prev_hash_wire = [
+            0x3c, 0x3d, 0x3e, 0x3f, // word 7 (was last)
+            0x38, 0x39, 0x3a, 0x3b, // word 6
+            0x34, 0x35, 0x36, 0x37, // word 5
+            0x30, 0x31, 0x32, 0x33, // word 4
+            0x2c, 0x2d, 0x2e, 0x2f, // word 3
+            0x28, 0x29, 0x2a, 0x2b, // word 2
+            0x24, 0x25, 0x26, 0x27, // word 1
+            0x20, 0x21, 0x22, 0x23, // word 0 (was first)
+        ];
+        assert_eq!(&frame[50..82], &expected_prev_hash_wire);
+
+        assert_eq!(&frame[82..86], &job.version.to_consensus().to_le_bytes());
 
         // Verify CRC16 (big-endian)
         assert_eq!(frame.len(), 88);
@@ -1741,6 +1845,46 @@ mod command_tests {
         let calculated_crc = crc16(&frame[2..86]);
         let frame_crc = u16::from_be_bytes([crc_bytes[0], crc_bytes[1]]);
         assert_eq!(calculated_crc, frame_crc);
+    }
+
+    #[test]
+    fn job_full_matches_esp_miner_capture() {
+        use crate::asic::bm13xx::test_data::esp_miner_job;
+
+        // Build JobFullFormat from high-level Bitcoin types
+        // Verify encoding produces exact wire bytes from hardware capture
+        let job = JobFullFormat {
+            job_id: *esp_miner_job::wire_tx::JOB_ID,
+            num_midstates: esp_miner_job::wire_tx::NUM_MIDSTATES_BYTE[0],
+            starting_nonce: u32::from_le_bytes(
+                (*esp_miner_job::wire_tx::STARTING_NONCE_BYTES)
+                    .try_into()
+                    .unwrap(),
+            ),
+            nbits: *esp_miner_job::wire_tx::NBITS,
+            ntime: *esp_miner_job::wire_tx::NTIME,
+            merkle_root: *esp_miner_job::wire_tx::MERKLE_ROOT,
+            prev_block_hash: *esp_miner_job::wire_tx::PREV_BLOCKHASH,
+            version: *esp_miner_job::wire_tx::VERSION,
+        };
+
+        let mut codec = FrameCodec::default();
+        let mut frame = BytesMut::new();
+        codec
+            .encode(
+                Command::JobFull {
+                    job_data: job.clone(),
+                },
+                &mut frame,
+            )
+            .expect("Failed to encode job command");
+
+        // Verify our encoding exactly matches the hardware capture
+        assert_eq!(
+            frame.as_ref(),
+            &esp_miner_job::wire_tx::FRAME,
+            "JobFull encoding doesn't match hardware capture"
+        );
     }
 
     fn assert_frame_eq(cmd: Command, expect: &[u8]) {
@@ -1765,6 +1909,40 @@ mod command_tests {
             .map(|b| format!("{:02x}", b))
             .collect::<Vec<String>>()
             .join(" ")
+    }
+
+    #[test]
+    fn job_full_encoding_matches_hardware_capture() {
+        use crate::asic::bm13xx::test_data::esp_miner_job;
+
+        // Build JobFullFormat from Bitcoin types and verify it encodes to exact wire bytes
+        let job = JobFullFormat {
+            job_id: *esp_miner_job::wire_tx::JOB_ID,
+            num_midstates: esp_miner_job::wire_tx::NUM_MIDSTATES_BYTE[0],
+            starting_nonce: u32::from_le_bytes(
+                (*esp_miner_job::wire_tx::STARTING_NONCE_BYTES)
+                    .try_into()
+                    .unwrap(),
+            ),
+            nbits: *esp_miner_job::wire_tx::NBITS,
+            ntime: *esp_miner_job::wire_tx::NTIME,
+            merkle_root: *esp_miner_job::wire_tx::MERKLE_ROOT,
+            prev_block_hash: *esp_miner_job::wire_tx::PREV_BLOCKHASH,
+            version: *esp_miner_job::wire_tx::VERSION,
+        };
+
+        let mut codec = FrameCodec::default();
+        let mut frame = BytesMut::new();
+        codec
+            .encode(Command::JobFull { job_data: job }, &mut frame)
+            .expect("Failed to encode job command");
+
+        // Verify our encoding exactly matches the wire capture
+        assert_eq!(
+            frame.as_ref(),
+            &esp_miner_job::wire_tx::FRAME,
+            "JobFull encoding doesn't match hardware capture"
+        );
     }
 }
 
@@ -2366,25 +2544,31 @@ impl BM13xxProtocol {
         }
     }
 
-    /// Encode a mining job into a chip command.
+    /// Encode a mining job into a chip command (legacy interface).
     ///
     /// For BM1370, this uses the full format where the chip calculates midstates.
     /// Job IDs should be managed by the caller and cycled appropriately.
+    ///
+    /// NOTE: This is legacy code used by old board interface. New code should
+    /// construct JobFullFormat directly from Bitcoin types.
+    #[deprecated(note = "Use JobFullFormat directly with Bitcoin types")]
     pub fn encode_mining_job(&self, job: &MiningJob, job_id: u8) -> Command {
-        // Convert MiningJob to JobFullFormat for BM1370
-        // Note: The caller is responsible for:
-        // - Converting hash values to big-endian format
-        // - Managing job ID assignment and cycling
-
+        // Convert MiningJob (legacy format with byte arrays) to JobFullFormat
         let job_data = JobFullFormat {
             job_id,
-            num_midstates: 0x01,                      // BM1370 typically uses 1
-            starting_nonce: [0x00, 0x00, 0x00, 0x00], // Start at 0
-            nbits: job.nbits.to_le_bytes(),
-            ntime: job.ntime.to_le_bytes(),
-            merkle_root: job.merkle_root,         // Should be big-endian
-            prev_block_hash: job.prev_block_hash, // Should be big-endian
-            version: job.version.to_le_bytes(),
+            num_midstates: 0x01, // BM1370 typically uses 1
+            starting_nonce: 0,   // Always start at 0
+            nbits: bitcoin::CompactTarget::from_consensus(job.nbits),
+            ntime: job.ntime,
+            // MiningJob stores hashes in wire format (big-endian word order)
+            // Convert to Bitcoin internal format
+            merkle_root: bitcoin::hash_types::TxMerkleNode::from_byte_array(hash_from_wire_bytes(
+                &job.merkle_root,
+            )),
+            prev_block_hash: bitcoin::BlockHash::from_byte_array(hash_from_wire_bytes(
+                &job.prev_block_hash,
+            )),
+            version: bitcoin::block::Version::from_consensus(job.version as i32),
         };
 
         Command::JobFull { job_data }

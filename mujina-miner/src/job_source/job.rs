@@ -5,6 +5,21 @@ use bitcoin::hash_types::BlockHash;
 use bitcoin::pow::{CompactTarget, Target};
 
 use super::{Extranonce2, MerkleRootKind, VersionTemplate};
+use crate::u256::U256;
+
+/// Convert integer difficulty to Target for share validation.
+///
+/// Uses exact 256-bit division: target = MAX_TARGET / difficulty
+/// This is the inverse of `target.difficulty_float()`.
+pub fn difficulty_to_target(difficulty: u64) -> Target {
+    if difficulty == 0 || difficulty == 1 {
+        return Target::MAX;
+    }
+
+    let max_target_u256 = U256::from_le_bytes(Target::MAX.to_le_bytes());
+    let target_u256 = max_target_u256 / difficulty;
+    Target::from_le_bytes(target_u256.to_le_bytes())
+}
 
 /// Template for mining jobs from any source.
 ///
@@ -27,8 +42,15 @@ pub struct JobTemplate {
     /// Block version with optional rolling capability
     pub version: VersionTemplate,
 
-    /// Encoded difficulty target
+    /// Encoded network difficulty target (for block header)
     pub bits: CompactTarget,
+
+    /// Share submission threshold.
+    ///
+    /// Shares are submitted if hash meets this target. Set by Stratum's
+    /// mining.set_difficulty (converted to Target). Independent from network
+    /// difficulty (bits field).
+    pub share_target: Target,
 
     /// Block timestamp
     pub time: u32,

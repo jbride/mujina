@@ -7,6 +7,9 @@ pub mod crc;
 pub mod error;
 pub mod protocol;
 
+#[cfg(test)]
+pub mod test_data;
+
 // Re-export commonly used types
 pub use protocol::{FrameCodec, Register, Response};
 

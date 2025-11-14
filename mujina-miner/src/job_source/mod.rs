@@ -42,7 +42,7 @@
 // Submodules
 pub mod dummy;
 mod extranonce2;
-mod job;
+pub(crate) mod job;
 mod merkle;
 mod messages;
 pub mod test_blocks;
