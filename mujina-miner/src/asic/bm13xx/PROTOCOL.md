@@ -34,7 +34,7 @@ Different chips in the BM13xx family have varying core architectures:
 
 - **BM1362**: Core count unknown (used in Antminer S19 J Pro)
   - Chip ID: `[0x13, 0x62]`
-- **BM1370**: 80 main cores × 16 sub-cores = 1,280 total hashing units
+- **BM1370**: 80 main cores x 16 sub-cores = 1,280 total hashing units
   - Chip ID: `[0x13, 0x70]`
 
 The core architecture affects how nonces are reported and job IDs are encoded.
@@ -46,14 +46,14 @@ All frames follow this basic structure:
 | Preamble | Type/Flags | Length | Payload | CRC |
 ```
 
-### Command Frames (Host → ASIC)
+### Command Frames (Host -> ASIC)
 - **Preamble**: `0x55 0xAA` (2 bytes)
 - **Type/Flags**: 1 byte encoding type, broadcast flag, and command
 - **Length**: 1 byte total frame length
 - **Payload**: Variable length data
 - **CRC**: CRC5 for commands, CRC16 for jobs
 
-### Response Frames (ASIC → Host)
+### Response Frames (ASIC -> Host)
 - **Preamble**: `0xAA 0x55` (2 bytes, reversed from commands)
 - **Payload**: Response-specific data
 - **CRC**: CRC5 in last byte (bits 0-4), with response type in bits 5-7
@@ -68,16 +68,16 @@ CRC16 checksums.
 
 Multi-byte data fields transmit least significant byte first:
 - **32-bit values**: nonce, nbits, ntime, version, register values
-  - Example: `0x12345678` → `[0x78, 0x56, 0x34, 0x12]`
+  - Example: `0x12345678` -> `[0x78, 0x56, 0x34, 0x12]`
 - **16-bit values**: version field in responses
-  - Example: `0x1234` → `[0x34, 0x12]`
+  - Example: `0x1234` -> `[0x34, 0x12]`
 
 ### Checksums (Big-Endian)
 
 CRC16 checksums in job packets use network byte order (big-endian), transmitting
 the high byte first. This follows common convention for integrity checks even in
 otherwise little-endian protocols.
-- **CRC16**: `0x6b18` → `[0x6b, 0x18]`
+- **CRC16**: `0x6b18` -> `[0x6b, 0x18]`
 
 ### Special Cases
 
@@ -223,7 +223,7 @@ merkle_root[32] | prev_block_hash[32] | version[4] |
   - This field may be vestigial for chips using full format
 - **starting_nonce** (4 bytes): Starting nonce value (always 0x00000000)
 - **nbits** (4 bytes): Encoded difficulty target (little-endian)
-  - Example: 0x170E3AB4 → transmitted as [0xB4, 0x3A, 0x0E, 0x17]
+  - Example: 0x170E3AB4 -> transmitted as [0xB4, 0x3A, 0x0E, 0x17]
 - **ntime** (4 bytes): Block timestamp (little-endian)
   - Unix timestamp
 - **merkle_root** (32 bytes): Root of transaction merkle tree
@@ -235,7 +235,7 @@ merkle_root[32] | prev_block_hash[32] | version[4] |
     into 8 4-byte words and reversing their order (word 0 with 7, 1 with 6, 2
     with 5, 3 with 4)
 - **version** (4 bytes): Block version (little-endian)
-  - Example: 0x20000000 → transmitted as [0x00, 0x00, 0x00, 0x20]
+  - Example: 0x20000000 -> transmitted as [0x00, 0x00, 0x00, 0x20]
   - Lower bits may be modified if version rolling enabled
 
 **Example Job Packet:**
@@ -317,7 +317,7 @@ The encoding allows ASICs to:
 
 **Field Encoding by Chip Type:**
 
-#### BM1370 (80 cores × 16 sub-cores = 1,280 units):
+#### BM1370 (80 cores x 16 sub-cores = 1,280 units):
 - **Nonce**: 32-bit nonce value (little-endian)
   - Bits 31-25: Main core ID (7 bits, values 0-79)
   - Bits 24-0: Actual nonce value
@@ -345,9 +345,9 @@ directly, and reconstruct them from responses using `(result_header & 0xf0) >>
 with how the chip actually operates.
 
 Example BM1370 response: `AA 55 18 00 A6 40 02 99 22 F9 91`
-- Nonce: 0x40A60018 → Main core 32, nonce value 0x00A60018
-- Result_Header: 0x99 → job_id=9 (bits 7-4), subcore_id=9 (bits 3-0)
-- Version: 0xF922 → Version bits 0x045F2000 (after shifting)
+- Nonce: 0x40A60018 -> Main core 32, nonce value 0x00A60018
+- Result_Header: 0x99 -> job_id=9 (bits 7-4), subcore_id=9 (bits 3-0)
+- Version: 0xF922 -> Version bits 0x045F2000 (after shifting)
 
 
 #### BM1362:
@@ -423,7 +423,7 @@ Controls nonce search space distribution (format not fully documented):
 #### 0x14 - TICKET_MASK (Difficulty)
 Sets the difficulty mask (4 bytes, little-endian):
 - Each byte is bit-reversed
-- Example: difficulty 256 = 0xFF000000 → transmitted as [0xFF, 0x00, 0x00,
+- Example: difficulty 256 = 0xFF000000 -> transmitted as [0xFF, 0x00, 0x00,
 0x00]
 
 #### 0x18 - MISC_CONTROL
@@ -620,7 +620,7 @@ The 32-bit nonce space (4.3 billion values) is automatically divided:
    - Core ID encoded in upper nonce bits (typically bits 24-31)
    - Each core searches ~33.5 million nonces (4.3B / 128 cores)
 
-3. **Example**: BM1370 with 80 cores × 16 sub-cores
+3. **Example**: BM1370 with 80 cores x 16 sub-cores
    - Bits 31-25: Main core ID (80 cores)
    - Bits 24-0: Actual nonce value searched
    - Total: 1,280 parallel searches per chip
@@ -670,7 +670,7 @@ Consider a 4-chip BM1370 chain mining a block:
    - Chip 1: Searches nonces where certain bits = 0x40
    - Chip 2: Searches nonces where certain bits = 0x80
    - Chip 3: Searches nonces where certain bits = 0xC0
-4. **Total parallel operations**: 4 chips × 1,280 cores = 5,120 simultaneous 
+4. **Total parallel operations**: 4 chips x 1,280 cores = 5,120 simultaneous
 searches
 
 #### Multiple Hash Board Distribution
@@ -693,7 +693,7 @@ duplicate work:
    - Board 0: Works on block with ntime=X
    - Board 1: Works on block with ntime=X+1
    - Board 2: Works on block with ntime=X+2
-   - Total: 3 boards × 76 chips × ~100 cores = ~23,000 parallel searches
+   - Total: 3 boards x 76 chips x ~100 cores = ~23,000 parallel searches
    - Each searching a DIFFERENT block variation
 
 4. **No Wasted Work**:
@@ -725,8 +725,8 @@ block template it belongs to
 Time 0ms:    Send Job with job_id=0 (mining block height 850,000)
 Time 50ms:   Send Job with job_id=1 (same block, updated transactions)
 Time 90ms:   NEW BLOCK! Send Job with job_id=2 (mining block height 850,001)
-Time 95ms:   Receive nonce with job_id=0 → Discard (old block)
-Time 100ms:  Receive nonce with job_id=2 → Valid for current block
+Time 95ms:   Receive nonce with job_id=0 -> Discard (old block)
+Time 100ms:  Receive nonce with job_id=2 -> Valid for current block
 ```
 
 ### CRC Calculation
@@ -767,7 +767,7 @@ nonce range by modifying the block version field.
 
 4. **Search Space Multiplication**:
    - Without version rolling: 2^32 hashes per job
-   - With 16-bit version rolling: 2^32 × 2^16 = 2^48 hashes per job
+   - With 16-bit version rolling: 2^32 x 2^16 = 2^48 hashes per job
    - At 1 TH/s, exhausting 2^48 hashes would take ~78 hours
 
 5. **Job Exhaustion**:
@@ -788,8 +788,8 @@ space partitioning:
 3. **No Duplication**:
    - Chip address bits embedded in nonce ensure unique ranges
    - Version rolling multiplies each chip's search space equally
-   - Total search space: (nonces per chip) × (chips) × (version values)
-   - Example: 1B nonces × 4 chips × 65K versions = 2^50 unique hashes
+   - Total search space: (nonces per chip) x (chips) x (version values)
+   - Example: 1B nonces x 4 chips x 65K versions = 2^50 unique hashes
 
 4. **Timing Considerations**:
    - All chips roll versions at different times

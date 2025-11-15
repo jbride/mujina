@@ -11,7 +11,7 @@ request-response based with packet framing.
 
 ## Packet Format
 
-### Request (Host → Device)
+### Request (Host -> Device)
 
 ```
 +--------+--------+--------+--------+--------+--------+----------+
@@ -27,7 +27,7 @@ request-response based with packet framing.
 - **Command**: Page-specific command byte
 - **Data**: Command-specific payload (practically limited by 4KB USB buffer)
 
-### Response (Device → Host)
+### Response (Device -> Host)
 
 ```
 +--------+--------+----------+

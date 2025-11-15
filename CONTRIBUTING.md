@@ -146,12 +146,12 @@ the performance of a feature, split it into two separate commits.
 #### Use Imperative Mood
 
 Write your commit message as if you're giving orders to the codebase:
-- ✅ "Add temperature monitoring to board controller"
-- ✅ "Fix race condition in share submission"
-- ✅ "Refactor protocol handler to use async/await"
-- ❌ "Added temperature monitoring"
-- ❌ "Fixes race condition"
-- ❌ "Refactoring protocol handler"
+- GOOD: "Add temperature monitoring to board controller"
+- GOOD: "Fix race condition in share submission"
+- GOOD: "Refactor protocol handler to use async/await"
+- BAD: "Added temperature monitoring"
+- BAD: "Fixes race condition"
+- BAD: "Refactoring protocol handler"
 
 A properly formed Git commit subject should complete this sentence:
 "If applied, this commit will _your subject here_"

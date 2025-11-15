@@ -24,7 +24,7 @@
 //!
 //! Sources send events through a cloneable sender they're given at construction.
 //! They receive commands through a unique receiver. The handle serves as the
-//! return address—coordinators store it when receiving events and use it to
+//! return address---coordinators store it when receiving events and use it to
 //! route commands back.
 //!
 //! ## Message Flow
@@ -114,7 +114,7 @@ impl Eq for SourceHandle {}
 /// Events from sources (push, source-initiated).
 ///
 /// Sources emit events when something happens (new work available, state change).
-/// Events are passive notifications—they report what happened, not request action.
+/// Events are passive notifications---they report what happened, not request action.
 #[derive(Debug)]
 pub enum SourceEvent {
     /// Update with new job (immediate preemption, old shares still valid).

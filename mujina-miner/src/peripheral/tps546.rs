@@ -217,7 +217,7 @@ impl<I2C: I2c> Tps546<I2C> {
         )
         .await?;
 
-        // VIN_OV_FAULT_RESPONSE (0xB7 = immediate shutdown, 6 retries, 7×TON_RISE delay)
+        // VIN_OV_FAULT_RESPONSE (0xB7 = immediate shutdown, 6 retries, 7xTON_RISE delay)
         const VIN_OV_FAULT_RESPONSE: u8 = 0xB7;
         trace!(
             "Setting VIN_OV_FAULT_RESPONSE: 0x{:02X} (immediate shutdown, 6 retries)",
@@ -318,17 +318,17 @@ impl<I2C: I2c> Tps546<I2C> {
 
         // Temperature protection
         trace!("----- TEMPERATURE");
-        const OT_WARN_LIMIT: i32 = 105; // °C
-        const OT_FAULT_LIMIT: i32 = 145; // °C
+        const OT_WARN_LIMIT: i32 = 105; // degC
+        const OT_FAULT_LIMIT: i32 = 145; // degC
         const OT_FAULT_RESPONSE: u8 = 0xFF; // Infinite retries
 
-        trace!("Setting OT_WARN_LIMIT: {}°C", OT_WARN_LIMIT);
+        trace!("Setting OT_WARN_LIMIT: {} degC", OT_WARN_LIMIT);
         self.write_word(
             PmbusCommand::OtWarnLimit,
             self.int_to_slinear11(OT_WARN_LIMIT),
         )
         .await?;
-        trace!("Setting OT_FAULT_LIMIT: {}°C", OT_FAULT_LIMIT);
+        trace!("Setting OT_FAULT_LIMIT: {} degC", OT_FAULT_LIMIT);
         self.write_word(
             PmbusCommand::OtFaultLimit,
             self.int_to_slinear11(OT_FAULT_LIMIT),
@@ -692,7 +692,7 @@ impl<I2C: I2c> Tps546<I2C> {
                 error!("  Current VIN: {:.2}V", vin_mv as f32 / 1000.0);
             }
             if let Ok(temp) = self.get_temperature().await {
-                error!("  Current Temperature: {}°C", temp);
+                error!("  Current Temperature: {} degC", temp);
             }
 
             critical_faults.push("Power controller is OFF".to_string());
@@ -848,14 +848,14 @@ impl<I2C: I2c> Tps546<I2C> {
 
         let ot_warn = self.read_word(PmbusCommand::OtWarnLimit).await?;
         debug!(
-            "OT_WARN_LIMIT: {}°C (raw: 0x{:04X})",
+            "OT_WARN_LIMIT: {} degC (raw: 0x{:04X})",
             self.slinear11_to_int(ot_warn),
             ot_warn
         );
 
         let ot_fault = self.read_word(PmbusCommand::OtFaultLimit).await?;
         debug!(
-            "OT_FAULT_LIMIT: {}°C (raw: 0x{:04X})",
+            "OT_FAULT_LIMIT: {} degC (raw: 0x{:04X})",
             self.slinear11_to_int(ot_fault),
             ot_fault
         );
@@ -877,7 +877,10 @@ impl<I2C: I2c> Tps546<I2C> {
         debug!("READ_IOUT: {:.2}A", self.slinear11_to_float(read_iout));
 
         let read_temp = self.read_word(PmbusCommand::ReadTemperature1).await?;
-        debug!("READ_TEMPERATURE_1: {}°C", self.slinear11_to_int(read_temp));
+        debug!(
+            "READ_TEMPERATURE_1: {} degC",
+            self.slinear11_to_int(read_temp)
+        );
 
         // Timing Configuration
         debug!("--- Timing Configuration ---");

@@ -497,7 +497,7 @@ where
             HashThreadError::InitializationFailed(format!("Core final send failed: {:?}", e))
         })?;
 
-    // Frequency ramping (56.25 MHz → 525 MHz)
+    // Frequency ramping (56.25 MHz -> 525 MHz)
     tracing::debug!("Ramping frequency from 56.25 MHz to 525 MHz");
     let frequency_steps = generate_frequency_ramp_steps(56.25, 525.0, 6.25);
 

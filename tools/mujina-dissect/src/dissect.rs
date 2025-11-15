@@ -146,7 +146,7 @@ pub fn dissect_i2c_operation_with_context(
 
                 // Format using PMBus value parser
                 if let Ok(pmbus_cmd) = pmbus::PmbusCommand::try_from(reg) {
-                    let direction = if is_read { "⟶" } else { "⟵" };
+                    let direction = if is_read { "->" } else { "<-" };
                     let op_type = if is_read { "READ" } else { "WRITE" };
 
                     if let Some(data) = data {
@@ -170,31 +170,31 @@ pub fn dissect_i2c_operation_with_context(
                 } else {
                     // Unknown command
                     if let Some(data) = data {
-                        let direction = if is_read { "⟶" } else { "⟵" };
+                        let direction = if is_read { "->" } else { "<-" };
                         let op_type = if is_read { "READ" } else { "WRITE" };
                         format!("{} {} CMD[0x{:02x}]={:02x?}", direction, op_type, reg, data)
                     } else {
-                        format!("⟵ WRITE CMD[0x{:02x}] (unknown command)", reg)
+                        format!("<- WRITE CMD[0x{:02x}] (unknown command)", reg)
                     }
                 }
             }
             I2cDevice::Unknown => {
                 if let Some(data) = &op.read_data {
-                    format!("⟶ READ [0x{:02x}]={:02x?}", reg, data)
+                    format!("-> READ [0x{:02x}]={:02x?}", reg, data)
                 } else if let Some(data) = &op.write_data {
-                    format!("⟵ WRITE [0x{:02x}]={:02x?}", reg, data)
+                    format!("<- WRITE [0x{:02x}]={:02x?}", reg, data)
                 } else {
                     // Command-only write (no data after register/command byte)
-                    format!("⟵ WRITE [0x{:02x}]", reg)
+                    format!("<- WRITE [0x{:02x}]", reg)
                 }
             }
         }
     } else {
         // No register specified, but we can still describe the operation
         if let Some(data) = &op.read_data {
-            format!("⟶ READ {:02x?} (no register)", data)
+            format!("-> READ {:02x?} (no register)", data)
         } else if let Some(data) = &op.write_data {
-            format!("⟵ WRITE {:02x?} (no register)", data)
+            format!("<- WRITE {:02x?} (no register)", data)
         } else {
             format!("I2C op @ 0x{:02x}", op.address)
         }

@@ -21,31 +21,31 @@ fully async using Tokio for concurrent I/O operations.
 
 ```
 src/
-├── bin/              # Binary entry points
-│   ├── minerd.rs     # mujina-minerd - Main daemon
-│   ├── cli.rs        # mujina-cli - Command line interface
-│   └── tui.rs        # mujina-tui - Terminal UI
-├── lib.rs            # Library root
-├── error.rs          # Common error types
-├── types.rs          # Core types (Job, Share, Nonce, etc.)
-├── config.rs         # Configuration loading and validation
-├── daemon.rs         # Daemon lifecycle management
-├── board/            # Hash board implementations
-├── transport/        # Physical transport layer
-├── mgmt_protocol/    # Board management protocols
-├── hw_trait/         # Hardware interface traits (I2C, SPI, GPIO, Serial)
-├── peripheral/       # Peripheral chip drivers
-├── asic/             # Mining ASIC drivers
-├── backplane.rs      # Backplane: board communication and lifecycle
-├── scheduler.rs      # Work scheduling and distribution
-├── job_generator.rs  # Local job generation (testing/solo) [deprecated]
-├── pool/             # Mining pool connectivity [deprecated]
-├── job_source/       # Unified mining job sources (pools, solo, testing)
-├── api/              # HTTP API and WebSocket
-├── api_client/       # Shared API client library
-│   ├── mod.rs        # Client implementation
-│   └── types.rs      # API DTOs and models
-└── tracing.rs        # Logging and observability
++-- bin/              # Binary entry points
+|   +-- minerd.rs     # mujina-minerd - Main daemon
+|   +-- cli.rs        # mujina-cli - Command line interface
+|   `-- tui.rs        # mujina-tui - Terminal UI
++-- lib.rs            # Library root
++-- error.rs          # Common error types
++-- types.rs          # Core types (Job, Share, Nonce, etc.)
++-- config.rs         # Configuration loading and validation
++-- daemon.rs         # Daemon lifecycle management
++-- board/            # Hash board implementations
++-- transport/        # Physical transport layer
++-- mgmt_protocol/    # Board management protocols
++-- hw_trait/         # Hardware interface traits (I2C, SPI, GPIO, Serial)
++-- peripheral/       # Peripheral chip drivers
++-- asic/             # Mining ASIC drivers
++-- backplane.rs      # Backplane: board communication and lifecycle
++-- scheduler.rs      # Work scheduling and distribution
++-- job_generator.rs  # Local job generation (testing/solo) [deprecated]
++-- pool/             # Mining pool connectivity [deprecated]
++-- job_source/       # Unified mining job sources (pools, solo, testing)
++-- api/              # HTTP API and WebSocket
++-- api_client/       # Shared API client library
+|   +-- mod.rs        # Client implementation
+|   `-- types.rs      # API DTOs and models
+`-- tracing.rs        # Logging and observability
 ```
 
 ## Module Descriptions
@@ -104,39 +104,39 @@ with a specific responsibility. This design enables maximum code reuse and
 testability.
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│                     Board Implementation                     │
-│   orchestrates all components for a specific board model     │
-└──────────────────────────────────────────────────────────────┘
-               │                               │                
-               │                               │                
-┌─────────────────────────────┐ ┌──────────────────────────────┐
-│         Peripheral          │ │            ASICs             │
-│     peripheral drivers      │ │   ┌──────────────────────┐   │
-│ ┌──────┐ ┌───────┐┌───────┐ │ │   │     BM13xx Family    │   │
-│ │ TMP75│ │INA260 ││EMC2101│ │ │   │  ┌──────┐ ┌──────┐   │   │
-│ └───┬──┘ └───┬───┘└───┬───┘ │ │   │  │BM1370│ │BM1362│   │   │
-└─────────────────────────────┘ │   │  └───┬──┘ └───┬──┘   │   │
-      │        │        │       │   └──────────────────────┘   │
-      └────────┼────────┘       └──────────────────────────────┘
-               │                           └────┬───┘           
-               └───────────────┬────────────────┘               
-                               │                                
-┌──────────────────────────────────────────────────────────────┐
-│            Hardware Abstraction Layer (hw_trait)             │
-│          I2C, SPI, GPIO, Serial trait definitions            │
-└──────────────────────────────────────────────────────────────┘
-                               │                                
-┌──────────────────────────────────────────────────────────────┐
-│              Management Protocols (mgmt_protocol)            │
-│           Implement hw_traits over board protocols           │
-└──────────────────────────────────────────────────────────────┘
-                               │                                
-┌──────────────────────────────────────────────────────────────┐
-│                    Transport Layers                          │
-│              Physical connections to boards                  │
-│            USB Serial, PCIe, Ethernet (future)               │
-└──────────────────────────────────────────────────────────────┘
++--------------------------------------------------------------+
+|                     Board Implementation                     |
+|   orchestrates all components for a specific board model     |
++--------------------------------------------------------------+
+               |                               |
+               |                               |
++-----------------------------+ +------------------------------+
+|         Peripheral          | |            ASICs             |
+|     peripheral drivers      | |   +----------------------+   |
+| +------+ +-------++-------+ | |   |     BM13xx Family    |   |
+| | TMP75| |INA260 ||EMC2101| | |   |  +------+ +------+   |   |
+| +---+--+ +---+---++---+---+ | |   |  |BM1370| |BM1362|   |   |
++-----------------------------+ |   |  +---+--+ +---+--+   |   |
+      |        |        |       |   +----------------------+   |
+      +--------+--------+       +------------------------------+
+               |                           +----+---+
+               +-----------+---------------+
+                               |
++--------------------------------------------------------------+
+|            Hardware Abstraction Layer (hw_trait)             |
+|          I2C, SPI, GPIO, Serial trait definitions            |
++--------------------------------------------------------------+
+                               |
++--------------------------------------------------------------+
+|              Management Protocols (mgmt_protocol)            |
+|           Implement hw_traits over board protocols           |
++--------------------------------------------------------------+
+                               |
++--------------------------------------------------------------+
+|                    Transport Layers                          |
+|              Physical connections to boards                  |
+|            USB Serial, PCIe, Ethernet (future)               |
++--------------------------------------------------------------+
 ```
 
 #### `transport/`
@@ -435,7 +435,7 @@ Dummy Work Generator -----> job_source::Dummy
 
 
 Hotplug Flow:
-USB Device ──> transport ──> BoardConnected Event ──> backplane
+USB Device --> transport --> BoardConnected Event --> backplane
                                                            |
                                                            v
                                                     Creates Board
@@ -555,18 +555,18 @@ The `api_client` module provides:
 This repository contains the core miner daemon and terminal-based tools:
 ```
 mujina-miner/
-├── Cargo.toml
-├── README.md
-├── docs/
-│   ├── architecture.md    # This file
-│   ├── api.md            # API documentation
-│   └── deployment.md     # Installation guide
-├── configs/
-│   └── example.toml      # Example configuration
-├── src/                  # Rust source code
-├── systemd/
-│   └── mujina-minerd.service
-└── debian/               # Debian packaging
++-- Cargo.toml
++-- README.md
++-- docs/
+|   +-- architecture.md    # This file
+|   +-- api.md            # API documentation
+|   `-- deployment.md     # Installation guide
++-- configs/
+|   `-- example.toml      # Example configuration
++-- src/                  # Rust source code
++-- systemd/
+|   `-- mujina-minerd.service
+`-- debian/               # Debian packaging
 ```
 
 The web interface lives in a separate repository to allow:

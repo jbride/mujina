@@ -588,7 +588,7 @@ impl BitaxeBoard {
 
                 // Read temperature
                 let temp = match fan.get_external_temperature().await {
-                    Ok(t) => format!("{:.1}°C", t),
+                    Ok(t) => format!("{:.1} degC", t),
                     Err(_) => "N/A".to_string(),
                 };
 
@@ -642,7 +642,7 @@ impl BitaxeBoard {
                 };
 
                 let vr_temp = match power.get_temperature().await {
-                    Ok(t) => format!("{}°C", t),
+                    Ok(t) => format!("{} degC", t),
                     Err(_) => "N/A".to_string(),
                 };
 

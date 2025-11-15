@@ -48,17 +48,17 @@ pub fn format_serial_frame(frame: &DissectedFrame, config: &OutputConfig) -> Str
         match frame.direction {
             Direction::HostToChip => {
                 let color = get_device_color(&DeviceId::AsicHostToChip);
-                format!("{}", format!("CI → ASIC {}", baud_str).color(color))
+                format!("{}", format!("CI -> ASIC {}", baud_str).color(color))
             }
             Direction::ChipToHost => {
                 let color = get_device_color(&DeviceId::AsicChipToHost);
-                format!("{}", format!("RO ← ASIC {}", baud_str).color(color))
+                format!("{}", format!("RO <- ASIC {}", baud_str).color(color))
             }
         }
     } else {
         match frame.direction {
-            Direction::HostToChip => format!("CI → ASIC {}", baud_str),
-            Direction::ChipToHost => format!("RO ← ASIC {}", baud_str),
+            Direction::HostToChip => format!("CI -> ASIC {}", baud_str),
+            Direction::ChipToHost => format!("RO <- ASIC {}", baud_str),
         }
     };
 
@@ -104,8 +104,8 @@ enum DeviceId {
 fn get_device_color(device_id: &DeviceId) -> colored::Color {
     match device_id {
         // ASIC directions get two bright, complementary colors
-        DeviceId::AsicHostToChip => colored::Color::BrightCyan, // CI → ASIC
-        DeviceId::AsicChipToHost => colored::Color::BrightYellow, // RO ← ASIC
+        DeviceId::AsicHostToChip => colored::Color::BrightCyan, // CI -> ASIC
+        DeviceId::AsicChipToHost => colored::Color::BrightYellow, // RO <- ASIC
 
         // I2C addresses get colors from remaining palette (reserve red for errors, avoid bright/regular pairs)
         DeviceId::I2cAddress(addr) => {

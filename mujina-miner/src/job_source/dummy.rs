@@ -82,8 +82,8 @@ impl DummySource {
             bits: *block_881423::BITS,
 
             // Share difficulty: ~1 share per 10 seconds at 1 TH/s
-            // Expected hashes = 1e12 hashes/sec × 10 sec = 1e13
-            // Difficulty = 1e13 / 2^32 ≈ 2328
+            // Expected hashes = 1e12 hashes/sec x 10 sec = 1e13
+            // Difficulty = 1e13 / 2^32 ~= 2328
             share_target: job::difficulty_to_target(2328),
 
             time: block_881423::TIME,

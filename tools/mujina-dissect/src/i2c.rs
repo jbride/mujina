@@ -388,7 +388,7 @@ pub fn group_pmbus_transactions(transactions: &[I2cTransaction]) -> Vec<I2cOpera
             let t2 = &transactions[i + 1];
             let t3 = &transactions[i + 2];
 
-            // Pattern: write reg → (incomplete/failed) → write reg → read data
+            // Pattern: write reg -> (incomplete/failed) -> write reg -> read data
             if !t2.is_read
                 && t2.data.len() == 1
                 && t3.is_read
@@ -735,7 +735,7 @@ mod tests {
     fn test_i2c_restart_pattern_assembler() {
         let mut assembler = I2cAssembler::new();
 
-        // Simulate I2C restart pattern: START → W@0x24 → 0x9A → RESTART → R@0x24 → data → STOP
+        // Simulate I2C restart pattern: START -> W@0x24 -> 0x9A -> RESTART -> R@0x24 -> data -> STOP
         assembler.process(&I2cEvent {
             event_type: I2cEventType::Start,
             timestamp: 1.0,

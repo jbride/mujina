@@ -12,9 +12,9 @@ echo "Running .githooks/pre-commit..."
 
 # Check for whitespace errors
 if git diff --cached --check; then
-    echo "${GREEN}✓${NC} No git whitespace errors"
+    echo "${GREEN}[OK]${NC} No git whitespace errors"
 else
-    echo "${RED}✗${NC} Whitespace errors detected by git. Fix them with:"
+    echo "${RED}[ERROR]${NC} Whitespace errors detected by git. Fix them with:"
     echo "  git diff --cached --name-only | xargs sed -i 's/[[:space:]]*$//'"
     FAILED=1
 fi
@@ -31,9 +31,9 @@ if git diff --cached --name-only | grep -q '\.rs$'; then
 
     # Check formatting on staged content
     if cargo fmt -- --check 2>/dev/null; then
-        echo "${GREEN}✓${NC} cargo fmt --check passes"
+        echo "${GREEN}[OK]${NC} cargo fmt --check passes"
     else
-        echo -e "${RED}✗${NC} cargo fmt --check issues detected in staged files. Fix with:"
+        echo -e "${RED}[ERROR]${NC} cargo fmt --check issues detected in staged files. Fix with:"
         echo "  cargo fmt"
         echo "  git add -u"
         FAILED=1
@@ -42,7 +42,7 @@ if git diff --cached --name-only | grep -q '\.rs$'; then
     # Restore working directory if we stashed
     if [ $STASHED -eq 0 ] && git stash list | grep -q "$STASH_NAME"; then
         if ! git stash pop -q; then
-            echo -e "${RED}✗${NC} Failed to restore working directory. Manually run:"
+            echo -e "${RED}[ERROR]${NC} Failed to restore working directory. Manually run:"
             echo "  git stash pop"
         fi
     fi

@@ -179,7 +179,7 @@ impl ChipType {
     /// Get expected hash engine count for this chip type, if known
     pub fn core_count(&self) -> Option<u32> {
         match self {
-            Self::BM1370 => Some(1280), // 80 domains × 16 engines
+            Self::BM1370 => Some(1280), // 80 domains x 16 engines
             _ => None,
         }
     }
@@ -1287,7 +1287,7 @@ impl Decoder for FrameCodec {
             {
                 // Dropped below frame size
                 trace!(
-                    "Decoder buffer: {} → {} bytes ({})",
+                    "Decoder buffer: {} -> {} bytes ({})",
                     self.last_buffer_size,
                     src.len(),
                     if src.len() > self.last_buffer_size {
@@ -2025,11 +2025,11 @@ mod response_tests {
             panic!("Expected nonce response");
         };
 
-        // From protocol doc: nonce 0x40A60018 → Main core 32, nonce value 0x00A60018
+        // From protocol doc: nonce 0x40A60018 -> Main core 32, nonce value 0x00A60018
         assert_eq!(nonce, 0x40a60018);
         assert_eq!(midstate_num, 0x02);
 
-        // Result header: 0x99 → bits[7:4]=9 (job_id), bits[3:0]=9 (subcore_id)
+        // Result header: 0x99 -> bits[7:4]=9 (job_id), bits[3:0]=9 (subcore_id)
         assert_eq!(job_id, 9);
         assert_eq!(subcore_id, 9);
 
@@ -2402,7 +2402,7 @@ mod ticket_mask_tests {
 
         // Test non-power-of-2 value
         let hr = Hashrate::gibihashes_per_sec(500.0);
-        // 500 GiH/s ≈ 2^38.9 H/s, rounds to 39
+        // 500 GiH/s ~= 2^38.9 H/s, rounds to 39
         assert_eq!(hr.log2().round() as u8, 39);
     }
 
@@ -2444,7 +2444,7 @@ mod ticket_mask_tests {
         assert_eq!(interval.exponent(), 38);
 
         // Non-power-of-2: 500 GiH/s, want 1 nonce/sec
-        // 500 GiH/s ≈ 2^38.9, rounds to 2^39
+        // 500 GiH/s ~= 2^38.9, rounds to 2^39
         let interval = ReportingInterval::from_rate(
             Hashrate::gibihashes_per_sec(500.0),
             ReportingRate::nonces_per_sec(1.0),

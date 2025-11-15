@@ -42,13 +42,13 @@ the total packet size. Total packet size = length + 3.
 #### GPIO Page Commands
 The command byte for GPIO operations is the pin number itself.
 - Write: `[pin_number] [0x00 or 0x01]` (low/high)
-- Read: `[pin_number]` → Response: `[0x00 or 0x01]`
+- Read: `[pin_number]` -> Response: `[0x00 or 0x01]`
 
 #### I2C Operations
 Standard I2C operations with 7-bit addressing:
 - Write: `[i2c_addr] [reg_addr] [data...]`
-- Read: `[i2c_addr] [reg_addr] [read_len]` → Response: `[data...]`
-- Write-Read: `[i2c_addr] [write_data...] [read_len]` → Response: `[data...]`
+- Read: `[i2c_addr] [reg_addr] [read_len]` -> Response: `[data...]`
+- Write-Read: `[i2c_addr] [write_data...] [read_len]` -> Response: `[data...]`
 
 ## Hardware Components
 
@@ -77,7 +77,7 @@ Standard I2C operations with 7-bit addressing:
 - Product ID: `0x28` (EMC2101-R variant with EEPROM support)
 - PWM fan controller with integrated temperature sensor
 - External temperature diode connected to ASIC
-- TACH input for RPM monitoring (5.6kΩ pull-up)
+- TACH input for RPM monitoring (5.6k-ohm pull-up)
 - Requires TACH input enabled in CONFIG register
 - See EMC2101 driver implementation for RPM calculation details
 
@@ -105,7 +105,7 @@ Standard I2C operations with 7-bit addressing:
 ### Thermal Management
 - Monitor ASIC temperature via EMC2101 external sensor
 - Adjust fan speed based on temperature
-- Typical operating range: 50-85°C
+- Typical operating range: 50-85 deg C
 
 ### Power Management
 - Monitor input voltage (5V nominal)
@@ -139,7 +139,7 @@ Standard I2C operations with 7-bit addressing:
 - Use `RUST_LOG=mujina_miner=trace` to see all serial communication
 - Monitor board statistics logged every 30 seconds
 - Check TACH reading for fan operation verification
-- Verify temperature readings are reasonable (not 0°C or >100°C)
+- Verify temperature readings are reasonable (not 0 degC or >100 degC)
 
 ## References
 

@@ -107,7 +107,7 @@ pub mod protocol {
     /// Decode temperature value (signed 8-bit)
     pub fn decode_temperature(value: u8) -> String {
         let temp = value as i8;
-        format!("{}°C", temp)
+        format!("{} degC", temp)
     }
 
     /// Decode PWM duty cycle to percentage
@@ -154,16 +154,16 @@ pub mod protocol {
                             format!("0x{:02x} ({})", data[0], rate_desc)
                         }
                         regs::INTERNAL_TEMP_LIMIT => {
-                            format!("0x{:02x} ({}°C)", data[0], data[0] as i8)
+                            format!("0x{:02x} ({} degC)", data[0], data[0] as i8)
                         }
                         _ => format!("0x{:02x}", data[0]),
                     };
-                    format!("⟶ READ {}={}", reg_name, decoded)
+                    format!("-> READ {}={}", reg_name, decoded)
                 } else {
-                    format!("⟶ READ {}={:02x?}", reg_name, data)
+                    format!("-> READ {}={:02x?}", reg_name, data)
                 }
             } else {
-                format!("⟶ READ {}", reg_name)
+                format!("-> READ {}", reg_name)
             }
         } else if let Some(data) = data {
             if data.len() == 1 {
@@ -171,12 +171,12 @@ pub mod protocol {
                     regs::FAN_SETTING | regs::FAN_MIN_DRIVE => decode_pwm_percent(data[0]),
                     _ => format!("0x{:02x}", data[0]),
                 };
-                format!("⟵ WRITE {}={}", reg_name, decoded)
+                format!("<- WRITE {}={}", reg_name, decoded)
             } else {
-                format!("⟵ WRITE {}={:02x?}", reg_name, data)
+                format!("<- WRITE {}={:02x?}", reg_name, data)
             }
         } else {
-            format!("⟵ WRITE REG[0x{:02x}]", reg)
+            format!("<- WRITE REG[0x{:02x}]", reg)
         }
     }
 }
@@ -302,14 +302,14 @@ impl<I: I2c> Emc2101<I> {
         let high = self.read_register(regs::EXTERNAL_TEMP_HIGH).await?;
         let low = self.read_register(regs::EXTERNAL_TEMP_LOW).await?;
 
-        // Temperature is in 11-bit format with 0.125°C resolution
+        // Temperature is in 11-bit format with 0.125 degC resolution
         // High byte is integer part, low byte bits 7-5 are fractional
         const FRACTION_BITS: u8 = 3;
         const FRACTION_SHIFT: u8 = 5;
         let raw = ((high as u16) << FRACTION_BITS) | ((low as u16) >> FRACTION_SHIFT);
 
         // Convert to Celsius
-        const RESOLUTION: f32 = 0.125; // °C per LSB
+        const RESOLUTION: f32 = 0.125; // degC per LSB
         const SIGN_BIT: u16 = 0x400; // 11-bit sign bit
         const VALUE_MASK: u16 = 0x7FF; // 11-bit mask
 
@@ -327,7 +327,7 @@ impl<I: I2c> Emc2101<I> {
     pub async fn get_internal_temperature(&mut self) -> Result<f32> {
         let raw = self.read_register(regs::INTERNAL_TEMP).await?;
 
-        // Internal temp is 8-bit signed with 1°C resolution
+        // Internal temp is 8-bit signed with 1 degC resolution
         Ok(raw as i8 as f32)
     }
 

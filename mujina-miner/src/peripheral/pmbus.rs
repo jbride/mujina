@@ -15,7 +15,7 @@ use thiserror::Error;
 // ============================================================================
 
 /// Default VOUT_MODE for devices that don't specify
-/// Uses exponent -9 (2^-9 ≈ 0.00195V resolution) which provides
+/// Uses exponent -9 (2^-9 ~= 0.00195V resolution) which provides
 /// millivolt-level precision suitable for most power supplies
 const DEFAULT_VOUT_MODE: u8 = 0x17; // -9 in 5-bit two's complement
 
@@ -393,7 +393,7 @@ impl PartialOrd for PmbusTemperature {
 
 impl fmt::Display for PmbusTemperature {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:.1}°C", self.value())
+        write!(f, "{:.1} degC", self.value())
     }
 }
 
@@ -1090,8 +1090,8 @@ impl StatusDecoder {
         let delay_desc = match delay_time {
             0 => "TON_RISE delay".to_string(),
             1 => "TON_RISE delay".to_string(),
-            2..=4 => format!("{} × TON_RISE delay", delay_time),
-            5..=7 => format!("{} × TON_RISE delay", delay_time),
+            2..=4 => format!("{} x TON_RISE delay", delay_time),
+            5..=7 => format!("{} x TON_RISE delay", delay_time),
             _ => "unknown delay".to_string(),
         };
 
