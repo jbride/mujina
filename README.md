@@ -98,15 +98,59 @@ cargo test
 
 ## Running
 
+At this point in development, configuration is done via environment variables.
+Once configuration storage and API functionality are more complete, persistent
+configuration will be available through the REST API and CLI tools.
+
+### Pool Configuration
+
+Connect to a Stratum v1 mining pool:
+
 ```bash
-# Run with default logging
+MUJINA_POOL_URL="stratum+tcp://localhost:3333" \
+MUJINA_POOL_USER="bc1qce93hy5rhg02s6aeu7mfdvxg76x66pqqtrvzs3.mujina" \
+MUJINA_POOL_PASS="custom-password" \
+cargo run
+```
+
+The password defaults to "x" if not specified.
+
+Without `MUJINA_POOL_URL`, the miner runs with a dummy job source that
+generates synthetic mining work, which is useful for testing hardware without a
+pool connection.
+
+### Log Levels
+
+Control output verbosity with `RUST_LOG`:
+
+```bash
+# Info level (default) -- shows pool connection, shares, errors
 cargo run
 
-# Run with debug logging
+# Debug level -- adds job distribution, hardware state changes
 RUST_LOG=mujina_miner=debug cargo run
 
-# Run with trace logging (shows all hardware and network communication)
+# Trace level -- shows all protocol traffic (serial, network, I2C)
 RUST_LOG=mujina_miner=trace cargo run
+```
+
+Target specific modules for focused debugging:
+
+```bash
+# Trace just the Stratum v1 client
+RUST_LOG=mujina_miner::stratum_v1=trace cargo run
+
+# Debug Stratum v1, trace BM13xx protocol
+RUST_LOG=mujina_miner::stratum_v1=debug,mujina_miner::asic::bm13xx=trace cargo run
+```
+
+Combine pool configuration with logging as needed:
+
+```bash
+RUST_LOG=mujina_miner=debug \
+MUJINA_POOL_URL="stratum+tcp://localhost:3333" \
+MUJINA_POOL_USER="your-address.worker" \
+cargo run
 ```
 
 ## Protocol Analysis Tool
