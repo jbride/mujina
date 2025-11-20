@@ -267,19 +267,23 @@ impl StratumV1Source {
         );
 
         // Spawn client task
-        let client_handle = tokio::spawn(async move {
-            if let Err(e) = client.run().await {
-                warn!(error = %e, "Stratum client error");
-            }
-        });
+        let client_handle = tokio::spawn(async move { client.run().await });
 
         // Main event loop
         loop {
             tokio::select! {
                 // Events from Stratum client
-                Some(event) = client_event_rx.recv() => {
-                    if let Err(e) = self.handle_client_event(event).await {
-                        warn!(error = %e, "Error handling client event");
+                event_opt = client_event_rx.recv() => {
+                    match event_opt {
+                        Some(event) => {
+                            if let Err(e) = self.handle_client_event(event).await {
+                                warn!(error = %e, "Error handling client event");
+                            }
+                        }
+                        None => {
+                            warn!("Client event channel closed (client task exited)");
+                            break;
+                        }
                     }
                 }
 
@@ -318,9 +322,16 @@ impl StratumV1Source {
             }
         }
 
-        // Wait for client to finish
-        client_handle.await?;
-
-        Ok(())
+        // Wait for client to finish and propagate any errors
+        match client_handle.await? {
+            Ok(()) => {
+                info!("Stratum client exited cleanly");
+                Ok(())
+            }
+            Err(e) => {
+                warn!(error = %e, "Stratum client failed");
+                Err(e.into())
+            }
+        }
     }
 }

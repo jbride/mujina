@@ -433,6 +433,19 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_malformed_error_response() {
+        // Some pools send error responses with id=null, which doesn't match
+        // our JsonRpcMessage enum (Response expects id: u64)
+        let json_str = r#"{"id":null,"result":null,"error":[20,"Suggest difficulty validation error",", null"]}"#;
+
+        let result = serde_json::from_str::<JsonRpcMessage>(json_str);
+        assert!(
+            result.is_err(),
+            "Malformed response with id=null should fail to parse"
+        );
+    }
+
+    #[test]
     fn test_parse_block_hash_stratum_encoding() {
         // Stratum sends block hashes with word-swapped encoding
         // This is "6b6455fd" + "6db962c1" + ... (8 words of 4 bytes each)

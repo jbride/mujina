@@ -615,8 +615,8 @@ impl StratumV1Client {
             tokio::select! {
                 // Read messages from pool
                 msg = conn.read_message() => {
-                    match msg? {
-                        Some(msg) => {
+                    match msg {
+                        Ok(Some(msg)) => {
                             // Handle the message
                             match msg {
                                 JsonRpcMessage::Request { id: None, method, params } => {
@@ -641,11 +641,20 @@ impl StratumV1Client {
                                 }
                             }
                         }
-                        None => {
+                        Ok(None) => {
                             // Connection closed
                             info!("Connection closed by pool");
                             self.event_tx.send(ClientEvent::Disconnected).await.ok();
                             return Err(StratumError::Disconnected);
+                        }
+                        Err(StratumError::InvalidMessage(msg)) => {
+                            // Pool sent malformed message (e.g., error response with id=null)
+                            // Log as warning but don't disconnect
+                            warn!(error = %msg, "Received malformed message from pool, ignoring");
+                        }
+                        Err(e) => {
+                            // Other errors are fatal
+                            return Err(e);
                         }
                     }
                 }
