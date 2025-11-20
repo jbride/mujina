@@ -728,32 +728,116 @@ mod tests {
     use bitcoin::hashes::Hash;
     use tokio::time::{timeout, Duration};
 
-    /// Integration test against a real pool.
+    /// Integration test: Connect to public-pool.io and validate protocol.
     ///
-    /// This test connects to public-pool.io:21496 (a public Bitcoin mining pool)
-    /// to validate the complete protocol implementation. It verifies:
-    /// - TCP connection establishment
-    /// - mining.subscribe handshake
-    /// - mining.authorize authentication
-    /// - Receiving mining.notify (new jobs)
-    /// - Receiving mining.set_difficulty
+    /// Tests against public-pool.io to validate:
+    /// - Connection and subscription
+    /// - Job reception and parsing
+    /// - Difficulty handling
     ///
-    /// This test is marked #[ignore] because:
-    /// - It requires network connectivity
-    /// - It depends on external infrastructure
-    /// - It may take several seconds to complete
+    /// # Running Integration Tests
     ///
-    /// Run explicitly with:
-    ///   cargo test --lib stratum_v1::client::tests::test_real_pool_connection -- --ignored
+    /// These tests are ignored by default (require network). Run individually:
+    ///
+    /// ```bash
+    /// # Run this test with output
+    /// cargo test --lib test_integration_public_pool -- --ignored --nocapture
+    ///
+    /// # Run all pool integration tests
+    /// cargo test --lib stratum_v1::client::tests::test_integration -- --ignored --nocapture
+    /// ```
     #[tokio::test]
     #[ignore]
-    async fn test_real_pool_connection() {
+    async fn test_integration_public_pool() {
+        test_pool_integration(
+            "public-pool.io:21496",
+            "bc1qce93hy5rhg02s6aeu7mfdvxg76x66pqqtrvzs3.mujina-integration-test",
+        )
+        .await;
+    }
+
+    /// Integration test: Connect to ckpool and validate protocol.
+    ///
+    /// Tests against solo.ckpool.org to validate protocol compatibility.
+    ///
+    /// See [`test_integration_public_pool`] for running instructions.
+    #[tokio::test]
+    #[ignore]
+    async fn test_integration_ckpool() {
+        test_pool_integration(
+            "solo.ckpool.org:3333",
+            "bc1qce93hy5rhg02s6aeu7mfdvxg76x66pqqtrvzs3.mujina-integration-test",
+        )
+        .await;
+    }
+
+    /// Integration test: Connect to Ocean and validate protocol.
+    ///
+    /// Tests against mine.ocean.xyz to validate protocol compatibility.
+    ///
+    /// See [`test_integration_public_pool`] for running instructions.
+    #[tokio::test]
+    #[ignore]
+    async fn test_integration_ocean() {
+        test_pool_integration(
+            "mine.ocean.xyz:3334",
+            "bc1qce93hy5rhg02s6aeu7mfdvxg76x66pqqtrvzs3.mujina-integration-test",
+        )
+        .await;
+    }
+
+    /// Integration test: Connect using environment variables.
+    ///
+    /// Tests against a pool specified by environment variables. Uses the same
+    /// environment variables as the daemon for consistency.
+    ///
+    /// # Environment Variables
+    ///
+    /// - `MUJINA_POOL_URL` - Pool URL (required, e.g., "stratum+tcp://localhost:3333")
+    /// - `MUJINA_POOL_USER` - Username/wallet address (optional, defaults to test address)
+    ///
+    /// # Running
+    ///
+    /// ```bash
+    /// # Minimal (uses default test address)
+    /// MUJINA_POOL_URL="stratum+tcp://localhost:3333" \
+    /// cargo test --lib test_pool_from_env -- --ignored --nocapture
+    ///
+    /// # With custom username
+    /// MUJINA_POOL_URL="stratum+tcp://localhost:3333" \
+    /// MUJINA_POOL_USER="bc1qce93hy5rhg02s6aeu7mfdvxg76x66pqqtrvzs3.my-worker" \
+    /// cargo test --lib test_pool_from_env -- --ignored --nocapture
+    /// ```
+    ///
+    /// Note: This test uses a different name pattern (`test_pool_from_env`)
+    /// so it doesn't run with the standard pool tests.
+    #[tokio::test]
+    #[ignore]
+    async fn test_pool_from_env() {
+        let pool_url =
+            std::env::var("MUJINA_POOL_URL").expect("MUJINA_POOL_URL environment variable not set");
+        let username = std::env::var("MUJINA_POOL_USER").unwrap_or_else(|_| {
+            "bc1qce93hy5rhg02s6aeu7mfdvxg76x66pqqtrvzs3.mujina-integration-test".to_string()
+        });
+
+        // Strip stratum+tcp:// prefix if present for test_pool_integration
+        let url_without_scheme = pool_url.strip_prefix("stratum+tcp://").unwrap_or(&pool_url);
+
+        println!("\n=== Testing custom pool configuration ===");
+        println!("Pool: {}", pool_url);
+        println!("Username: {}", username);
+
+        test_pool_integration(url_without_scheme, &username).await;
+    }
+
+    /// Common integration test logic for pool connections.
+    async fn test_pool_integration(pool_url: &str, username: &str) {
         use tracing_subscriber::{fmt, EnvFilter};
 
         // Initialize logging for the test
         let _ = fmt()
             .with_env_filter(
-                EnvFilter::from_default_env().add_directive("mujina_miner=debug".parse().unwrap()),
+                EnvFilter::from_default_env().add_directive("mujina_miner=warn".parse().unwrap()),
             )
             .try_init();
 
@@ -761,12 +845,14 @@ mod tests {
         let shutdown = CancellationToken::new();
 
         let config = PoolConfig {
-            url: "stratum+tcp://localhost:3333".to_string(),
-            username: "bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh.test-mujina".to_string(),
+            url: format!("stratum+tcp://{}", pool_url),
+            username: username.to_string(),
             password: "x".to_string(),
             user_agent: "mujina-miner/0.1.0-test".to_string(),
             suggested_difficulty: 4096,
         };
+
+        println!("\n=== Connecting to {} ===", pool_url);
 
         let client = StratumV1Client::new(config, event_tx, shutdown.clone());
 
@@ -782,18 +868,23 @@ mod tests {
             loop {
                 match event_rx.recv().await {
                     Some(event) => {
-                        println!("Event: {:?}", event);
-
                         match event {
+                            ClientEvent::VersionRollingConfigured { authorized_mask } => {
+                                println!("\n[Version Rolling]");
+                                if let Some(mask) = authorized_mask {
+                                    println!("  Authorized mask: {:#010x}", mask);
+                                } else {
+                                    println!("  Not supported");
+                                }
+                            }
+
                             ClientEvent::Subscribed {
                                 extranonce1,
                                 extranonce2_size,
                             } => {
-                                println!(
-                                    "OK Subscribed: extranonce1={}, size={}",
-                                    hex::encode(&extranonce1),
-                                    extranonce2_size
-                                );
+                                println!("\n[Subscribed]");
+                                println!("  Extranonce1: {}", hex::encode(&extranonce1));
+                                println!("  Extranonce2 size: {} bytes", extranonce2_size);
                                 assert!(!extranonce1.is_empty(), "extranonce1 should not be empty");
                                 assert!(
                                     extranonce2_size >= 4 && extranonce2_size <= 8,
@@ -803,7 +894,17 @@ mod tests {
                             }
 
                             ClientEvent::NewJob(job) => {
-                                println!("OK Received job: {}", job.job_id);
+                                println!("\n[New Job]");
+                                println!("  Job ID: {}", job.job_id);
+                                println!("  Previous hash: {}", job.prev_hash);
+                                println!("  Version: {:#010x}", job.version.to_consensus());
+                                println!("  Nbits: {:#010x}", job.nbits.to_consensus());
+                                println!("  Ntime: {} ({})", job.ntime, job.ntime);
+                                println!("  Merkle branches: {}", job.merkle_branches.len());
+                                println!("  Coinbase1 size: {} bytes", job.coinbase1.len());
+                                println!("  Coinbase2 size: {} bytes", job.coinbase2.len());
+                                println!("  Clean jobs: {}", job.clean_jobs);
+
                                 assert!(!job.job_id.is_empty(), "job_id should not be empty");
                                 assert_eq!(
                                     job.prev_hash.as_byte_array().len(),
@@ -816,30 +917,32 @@ mod tests {
                             }
 
                             ClientEvent::DifficultyChanged(diff) => {
-                                println!("OK Difficulty changed: {}", diff);
+                                println!("\n[Difficulty Changed]");
+                                println!("  Difficulty: {}", diff);
                                 assert!(diff > 0, "difficulty should be positive");
                                 received_difficulty = true;
                             }
 
                             ClientEvent::VersionMaskSet(mask) => {
-                                println!("OK Version mask set: {:#010x}", mask);
+                                println!("\n[Version Mask Set]");
+                                println!("  Mask: {:#010x}", mask);
                             }
 
                             ClientEvent::Disconnected => {
-                                println!("Disconnected from pool");
+                                println!("\n[Disconnected]");
                                 break;
                             }
 
                             ClientEvent::Error(err) => {
-                                println!("Error: {}", err);
+                                println!("\n[Error] {}", err);
                             }
 
                             _ => {}
                         }
 
-                        // Once we have all the events we're looking for, stop
+                        // Once we have all the events we're looking for, disconnect
                         if subscribed && received_job && received_difficulty {
-                            println!("\nOK All expected events received!");
+                            println!("\n=== All expected events received, disconnecting ===");
                             break;
                         }
                     }
