@@ -48,6 +48,7 @@ use anyhow::Result;
 use tokio::sync::mpsc;
 
 use super::{JobTemplate, Share};
+use crate::types::HashRate;
 
 /// Handle to a job source (identity + communication).
 ///
@@ -148,4 +149,7 @@ pub enum SourceEvent {
 pub enum SourceCommand {
     /// Submit this share to the pool/destination.
     SubmitShare(Share),
+
+    /// Update the source with expected hashrate (an estimate, not a measurement).
+    UpdateHashRate(HashRate),
 }

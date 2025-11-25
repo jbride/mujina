@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::stratum_v1::{ClientEvent, JobNotification, PoolConfig};
-use crate::types::Difficulty;
+use crate::types::{Difficulty, HashRate};
 
 use super::{
     Extranonce2Range, GeneralPurposeBits, JobTemplate, MerkleRootKind, MerkleRootTemplate, Share,
@@ -40,6 +40,9 @@ pub struct StratumV1Source {
 
     /// Track if first accepted share has been logged
     first_share_logged: bool,
+
+    /// Expected hashrate (an estimate, not a measurement)
+    expected_hashrate: HashRate,
 }
 
 /// Protocol state after successful subscription.
@@ -73,6 +76,7 @@ impl StratumV1Source {
             shutdown,
             state: None,
             first_share_logged: false,
+            expected_hashrate: HashRate::default(),
         }
     }
 
@@ -332,6 +336,10 @@ impl StratumV1Source {
                                     warn!(error = %e, "Failed to convert share");
                                 }
                             }
+                        }
+
+                        SourceCommand::UpdateHashRate(rate) => {
+                            self.expected_hashrate = rate;
                         }
                     }
                 }

@@ -143,6 +143,9 @@ impl DummySource {
                                 "Share received"
                             );
                         }
+                        SourceCommand::UpdateHashRate(_) => {
+                            // Ignored in dummy source
+                        }
                     }
                 }
 
