@@ -776,7 +776,6 @@ mod tests {
     /// See [`test_integration_public_pool`] for running instructions.
     #[tokio::test]
     #[ignore]
-    #[should_panic(expected = "Pool disconnected too shortly after subscribing")]
     async fn test_integration_ocean() {
         test_pool_integration(
             "mine.ocean.xyz:3334",
@@ -842,10 +841,9 @@ mod tests {
     ///
     /// The stability check (phase 3) was added after discovering that Ocean pool
     /// silently disconnects clients that suggest a difficulty lower than their
-    /// minimum (in our case, suggested_difficulty=4096). Without this check, the
-    /// test would pass on Ocean because it sends initial events before disconnecting.
-    /// The 5-second stability period catches pools that reject our configuration
-    /// with a delayed disconnect.
+    /// minimum. We now avoid suggesting difficulty altogether, but the stability
+    /// check remains valuable for catching delayed disconnects from pools that
+    /// reject our configuration after the initial handshake.
     async fn test_pool_integration(pool_url: &str, username: &str) {
         use tracing_subscriber::{fmt, EnvFilter};
 
@@ -864,7 +862,7 @@ mod tests {
             username: username.to_string(),
             password: "x".to_string(),
             user_agent: "mujina-miner/0.1.0-test".to_string(),
-            suggested_difficulty: Some(4096),
+            suggested_difficulty: None,
         };
 
         println!("\n=== Connecting to {} ===", pool_url);
