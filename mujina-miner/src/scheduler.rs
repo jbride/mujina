@@ -523,6 +523,35 @@ pub async fn task(
     debug!("Scheduler shutdown complete");
 }
 
+/// Format seconds as human-readable uptime.
+///
+/// Scales format based on duration to keep output compact:
+/// - Under 1 minute: "45s"
+/// - Under 1 hour: "12m 30s"
+/// - Under 1 day: "12h 38m"
+/// - 1 day or more: "1d 12h"
+fn format_uptime(secs: u64) -> String {
+    const MINUTE: u64 = 60;
+    const HOUR: u64 = 60 * MINUTE;
+    const DAY: u64 = 24 * HOUR;
+
+    if secs >= DAY {
+        let days = secs / DAY;
+        let hours = (secs % DAY) / HOUR;
+        format!("{}d {}h", days, hours)
+    } else if secs >= HOUR {
+        let hours = secs / HOUR;
+        let mins = (secs % HOUR) / MINUTE;
+        format!("{}h {}m", hours, mins)
+    } else if secs >= MINUTE {
+        let mins = secs / MINUTE;
+        let s = secs % MINUTE;
+        format!("{}m {}s", mins, s)
+    } else {
+        format!("{}s", secs)
+    }
+}
+
 /// Mining statistics tracker
 ///
 /// # Hashrate Calculation Methodology
@@ -567,31 +596,21 @@ impl Default for MiningStats {
 }
 
 impl MiningStats {
-    fn log_summary(&mut self) {
-        let elapsed = self.start_time.elapsed().as_secs_f64();
+    fn log_summary(&self) {
+        let elapsed = self.start_time.elapsed();
 
-        // Calculate hashrate from accumulated hashes
-        let hashrate = if elapsed > 0.0 && self.total_hashes > 0 {
-            let hashrate_hs = self.total_hashes as f64 / elapsed;
-            Some(HashRate(hashrate_hs as u64))
+        let hashrate_str = if self.total_hashes > 0 && elapsed.as_secs() > 0 {
+            let rate = HashRate((self.total_hashes as f64 / elapsed.as_secs_f64()) as u64);
+            rate.to_human_readable()
         } else {
-            None
+            "--".to_string()
         };
 
-        // Mining statistics
-        if let Some(rate) = hashrate {
-            info!(
-                uptime_s = elapsed as u64,
-                hashrate = %rate.to_human_readable(),
-                shares = self.shares_submitted,
-                "Mining status."
-            );
-        } else {
-            info!(
-                uptime_s = elapsed as u64,
-                shares = self.shares_submitted,
-                "Mining status."
-            );
-        }
+        info!(
+            uptime = %format_uptime(elapsed.as_secs()),
+            hashrate = %hashrate_str,
+            shares = self.shares_submitted,
+            "Mining status."
+        );
     }
 }
