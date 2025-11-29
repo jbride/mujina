@@ -4,29 +4,18 @@
 //! the miner. It re-exports commonly used types from rust-bitcoin and defines
 //! mining-specific types.
 
-// Re-export frequently used bitcoin types for convenience
-pub use bitcoin::block::Header as BlockHeader;
-pub use bitcoin::{Amount, BlockHash, Network, Target, Transaction, TxOut, Work};
+mod bitcoin_impls;
+mod difficulty;
+mod display_difficulty;
 
 use bitcoin::hashes::sha256d;
 use std::time::Duration;
 
-use crate::u256::U256;
-
-// Conversions between U256 and bitcoin's Target type. These live here rather
-// than in u256.rs to avoid coupling the generic integer type to bitcoin.
-
-impl From<Target> for U256 {
-    fn from(target: Target) -> Self {
-        Self::from_le_bytes(target.to_le_bytes())
-    }
-}
-
-impl From<U256> for Target {
-    fn from(u: U256) -> Self {
-        Target::from_le_bytes(u.to_le_bytes())
-    }
-}
+// Re-export frequently used bitcoin types for convenience
+pub use bitcoin::block::Header as BlockHeader;
+pub use bitcoin::{Amount, BlockHash, Network, Target, Transaction, TxOut, Work};
+pub use difficulty::Difficulty;
+pub use display_difficulty::DisplayDifficulty;
 
 /// A mining job sent to ASIC chips.
 #[derive(Debug, Clone)]
@@ -168,14 +157,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_target_u256_roundtrip() {
-        let target = Target::MAX;
-        let u = U256::from(target);
-        let back = Target::from(u);
-        assert_eq!(target, back);
-    }
-
-    #[test]
     fn test_hashrate_conversions() {
         let rate = HashRate::from_terahashes(100.0);
         assert_eq!(rate.as_terahashes(), 100.0);
@@ -273,9 +254,3 @@ mod tests {
         );
     }
 }
-
-mod difficulty;
-mod display_difficulty;
-
-pub use difficulty::Difficulty;
-pub use display_difficulty::DisplayDifficulty;
