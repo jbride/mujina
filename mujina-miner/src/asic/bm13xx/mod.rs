@@ -6,6 +6,7 @@
 pub mod crc;
 pub mod error;
 pub mod protocol;
+pub mod thread;
 
 #[cfg(test)]
 pub mod test_data;
