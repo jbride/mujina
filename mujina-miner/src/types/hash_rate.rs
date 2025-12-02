@@ -35,6 +35,11 @@ impl HashRate {
         self.0 as f64 / 1_000_000_000_000.0
     }
 
+    /// Returns true if the hashrate is zero.
+    pub fn is_zero(&self) -> bool {
+        self.0 == 0
+    }
+
     /// Format as human-readable string with appropriate units
     pub fn to_human_readable(&self) -> String {
         if self.0 >= 1_000_000_000_000 {
