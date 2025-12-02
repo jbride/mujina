@@ -37,7 +37,7 @@ impl Daemon {
     pub async fn run(self) -> anyhow::Result<()> {
         // Create channels for component communication
         let (transport_tx, transport_rx) = mpsc::channel::<TransportEvent>(100);
-        let (thread_tx, thread_rx) = mpsc::channel::<Vec<Box<dyn HashThread>>>(10);
+        let (thread_tx, thread_rx) = mpsc::channel::<Box<dyn HashThread>>(10);
         let (source_reg_tx, source_reg_rx) = mpsc::channel::<SourceRegistration>(10);
 
         // Create and start USB transport discovery

@@ -163,7 +163,7 @@ fn warn_if_difficulty_too_high(job: &JobTemplate, hashrate: HashRate, source_nam
 /// Run the scheduler task, receiving hash threads and job sources.
 pub async fn task(
     running: CancellationToken,
-    mut thread_rx: mpsc::Receiver<Vec<Box<dyn HashThread>>>,
+    mut thread_rx: mpsc::Receiver<Box<dyn HashThread>>,
     mut source_reg_rx: mpsc::Receiver<SourceRegistration>,
 ) {
     // Source storage and event multiplexing
@@ -177,33 +177,6 @@ pub async fn task(
     // Task bookkeeping: each task gets an entry and a share channel
     let mut tasks: SlotMap<TaskId, TaskEntry> = SlotMap::new();
     let mut share_channels: StreamMap<TaskId, ReceiverStream<Share>> = StreamMap::new();
-
-    // Wait for the first set of hash threads from the backplane
-    let initial_threads = match thread_rx.recv().await {
-        Some(threads) => threads,
-        None => return,
-    };
-
-    if initial_threads.is_empty() {
-        error!("No hash threads received from backplane");
-        return;
-    }
-
-    debug!(
-        "Received {} hash thread(s) from backplane",
-        initial_threads.len()
-    );
-
-    // Insert threads into SlotMap and StreamMap
-    for mut thread in initial_threads {
-        let event_rx = thread
-            .take_event_receiver()
-            .expect("Thread missing event receiver");
-
-        let thread_id = threads.insert(thread);
-        thread_events.insert(thread_id, ReceiverStream::new(event_rx));
-        debug!(thread_id = ?thread_id, "Thread registered");
-    }
 
     // Track mining statistics
     let mut stats = MiningStats::default();
@@ -255,6 +228,12 @@ pub async fn task(
                             job_id = %job_template.id,
                             "UpdateJob received"
                         );
+
+                        // Skip if no threads registered yet
+                        if threads.is_empty() {
+                            debug!(source = %source.name, "No threads available, skipping job");
+                            continue;
+                        }
 
                         // Check if difficulty is reasonable for our hashrate (once per source)
                         if !difficulty_warned_sources.contains(&source_id) {
@@ -315,6 +294,12 @@ pub async fn task(
                             job_id = %job_template.id,
                             "ReplaceJob received"
                         );
+
+                        // Skip if no threads registered yet
+                        if threads.is_empty() {
+                            debug!(source = %source.name, "No threads available, skipping job");
+                            continue;
+                        }
 
                         // Check if difficulty is reasonable for our hashrate (once per source)
                         if !difficulty_warned_sources.contains(&source_id) {
@@ -473,23 +458,15 @@ pub async fn task(
                 }
             }
 
-            // New thread batches from backplane
-            Some(new_threads) = thread_rx.recv() => {
-                if new_threads.is_empty() {
-                    continue;
-                }
+            // New thread from backplane
+            Some(mut thread) = thread_rx.recv() => {
+                let event_rx = thread
+                    .take_event_receiver()
+                    .expect("Thread missing event receiver");
 
-                debug!("Received {} new hash thread(s)", new_threads.len());
-
-                for mut thread in new_threads {
-                    let event_rx = thread
-                        .take_event_receiver()
-                        .expect("Thread missing event receiver");
-
-                    let thread_id = threads.insert(thread);
-                    thread_events.insert(thread_id, ReceiverStream::new(event_rx));
-                    debug!(thread_id = ?thread_id, "Thread registered");
-                }
+                let thread_id = threads.insert(thread);
+                thread_events.insert(thread_id, ReceiverStream::new(event_rx));
+                debug!(thread_id = ?thread_id, "Thread registered");
 
                 // Broadcast updated hashrate to all sources
                 let hashrate = total_hashrate_estimate(&threads);

@@ -44,14 +44,14 @@ pub struct Backplane {
     boards: HashMap<String, Box<dyn Board + Send>>,
     event_rx: mpsc::Receiver<TransportEvent>,
     /// Channel to send hash threads to the scheduler
-    scheduler_tx: mpsc::Sender<Vec<Box<dyn HashThread>>>,
+    scheduler_tx: mpsc::Sender<Box<dyn HashThread>>,
 }
 
 impl Backplane {
     /// Create a new backplane.
     pub fn new(
         event_rx: mpsc::Receiver<TransportEvent>,
-        scheduler_tx: mpsc::Sender<Vec<Box<dyn HashThread>>>,
+        scheduler_tx: mpsc::Sender<Box<dyn HashThread>>,
     ) -> Self {
         Self {
             registry: BoardRegistry,
@@ -146,13 +146,16 @@ impl Backplane {
                         // Store board for lifecycle management
                         self.boards.insert(board_id.clone(), board);
 
-                        // Send threads to scheduler
-                        if let Err(e) = self.scheduler_tx.send(threads).await {
-                            tracing::error!(
-                                board = %board_info.model,
-                                error = %e,
-                                "Failed to send threads to scheduler"
-                            );
+                        // Send threads to scheduler individually
+                        for thread in threads {
+                            if let Err(e) = self.scheduler_tx.send(thread).await {
+                                tracing::error!(
+                                    board = %board_info.model,
+                                    error = %e,
+                                    "Failed to send thread to scheduler"
+                                );
+                                break;
+                            }
                         }
                     }
                     Err(e) => {
