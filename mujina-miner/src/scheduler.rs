@@ -47,19 +47,27 @@ use crate::types::{expected_time_to_share_from_target, HashRate};
 use crate::u256::U256;
 
 /// Unique identifier for a job source, assigned by the scheduler.
-pub type SourceId = slotmap::DefaultKey;
+type SourceId = slotmap::DefaultKey;
 
 /// Unique identifier for a hash thread, assigned by the scheduler.
-pub type ThreadId = slotmap::DefaultKey;
+type ThreadId = slotmap::DefaultKey;
 
 /// Unique identifier for a task, assigned by the scheduler.
-pub type TaskId = slotmap::DefaultKey;
+type TaskId = slotmap::DefaultKey;
+
+// StreamMap type aliases for cleaner function signatures.
+// These are kept as locals in run() rather than struct fields to avoid
+// borrow conflicts with tokio::select!.
+type SourceEventStream = StreamMap<SourceId, ReceiverStream<SourceEvent>>;
+type ThreadEventStream = StreamMap<ThreadId, ReceiverStream<HashThreadEvent>>;
+type ShareStream = StreamMap<TaskId, ReceiverStream<Share>>;
 
 /// Scheduler-side bookkeeping for an active task.
 ///
 /// Each HashTask sent to a thread has a corresponding TaskEntry in the
 /// scheduler. When a share arrives on the task's channel, this provides
 /// routing: which source to submit to and the job template for validation.
+#[derive(Debug)]
 struct TaskEntry {
     /// Source that provided this job
     source_id: SourceId,
@@ -88,6 +96,7 @@ pub struct SourceRegistration {
 }
 
 /// Internal scheduler tracking for a registered source.
+#[derive(Debug)]
 struct SourceEntry {
     /// Source name for logging
     name: String,
@@ -99,29 +108,527 @@ struct SourceEntry {
     last_job: Option<Arc<JobTemplate>>,
 }
 
-/// Calculates aggregate hashrate from all registered threads.
-fn total_hashrate_estimate<T>(threads: &SlotMap<ThreadId, T>) -> HashRate
-where
-    T: std::ops::Deref<Target = dyn HashThread>,
-{
-    let total: u64 = threads
-        .values()
-        .map(|t| t.capabilities().hashrate_estimate.0)
-        .sum();
-    HashRate(total)
+/// Whether to update alongside existing work or replace it.
+#[derive(Debug)]
+enum AssignMode {
+    /// Add new task alongside existing (UpdateJob behavior)
+    Update,
+    /// Invalidate old tasks, replace current work (ReplaceJob behavior)
+    Replace,
+}
+
+/// Core scheduler state.
+///
+/// StreamMaps are kept separate (in `run()`) to avoid borrow conflicts with
+/// `tokio::select!`. This struct holds the business state that methods operate
+/// on.
+struct Scheduler {
+    /// Source storage and command channels
+    sources: SlotMap<SourceId, SourceEntry>,
+
+    /// Thread storage
+    threads: SlotMap<ThreadId, Box<dyn HashThread>>,
+
+    /// Task bookkeeping (maps tasks to sources/threads)
+    tasks: SlotMap<TaskId, TaskEntry>,
+
+    /// Mining statistics
+    stats: MiningStats,
+
+    /// Track sources warned about high difficulty (reset on hashrate change)
+    difficulty_warned_sources: HashSet<SourceId>,
+
+    /// Track thread count for disconnect detection
+    last_thread_count: usize,
+}
+
+impl Scheduler {
+    fn new() -> Self {
+        Self {
+            sources: SlotMap::new(),
+            threads: SlotMap::new(),
+            tasks: SlotMap::new(),
+            stats: MiningStats::default(),
+            difficulty_warned_sources: HashSet::new(),
+            last_thread_count: 0,
+        }
+    }
+
+    /// Calculates aggregate hashrate from all registered threads.
+    fn total_hashrate(&self) -> HashRate {
+        let total: u64 = self
+            .threads
+            .values()
+            .map(|t| t.capabilities().hashrate_estimate.0)
+            .sum();
+        HashRate(total)
+    }
+
+    /// Collects hashrate command senders from all sources.
+    ///
+    /// Used with `broadcast_hashrate()` to avoid capturing `&self` across
+    /// await points (Scheduler contains Box<dyn HashThread> which isn't Sync).
+    fn hashrate_senders(&self) -> Vec<mpsc::Sender<SourceCommand>> {
+        self.sources
+            .values()
+            .map(|s| s.command_tx.clone())
+            .collect()
+    }
+
+    /// Remove tasks matching a predicate, closing their share channels.
+    fn remove_tasks_where(
+        &mut self,
+        share_channels: &mut ShareStream,
+        predicate: impl Fn(&TaskEntry) -> bool,
+    ) {
+        let task_ids: Vec<TaskId> = self
+            .tasks
+            .iter()
+            .filter(|(_, entry)| predicate(entry))
+            .map(|(id, _)| id)
+            .collect();
+
+        for task_id in task_ids {
+            self.tasks.remove(task_id);
+            share_channels.remove(&task_id);
+        }
+    }
+
+    /// Handle registration of a new job source.
+    async fn handle_source_registration(
+        &mut self,
+        registration: SourceRegistration,
+        source_events: &mut SourceEventStream,
+    ) {
+        let source_id = self.sources.insert(SourceEntry {
+            name: registration.name.clone(),
+            command_tx: registration.command_tx,
+            last_job: None,
+        });
+        source_events.insert(source_id, ReceiverStream::new(registration.event_rx));
+        debug!(source_id = ?source_id, name = %registration.name, "Source registered");
+
+        // Send current hashrate estimate to the new source
+        let hashrate = self.total_hashrate();
+        let _ = self.sources[source_id]
+            .command_tx
+            .send(SourceCommand::UpdateHashRate(hashrate))
+            .await;
+    }
+
+    /// Assign or replace work on all threads from a job template.
+    async fn assign_job_to_threads(
+        &mut self,
+        mode: AssignMode,
+        source_id: SourceId,
+        job_template: JobTemplate,
+        share_channels: &mut ShareStream,
+    ) {
+        let source_name = self
+            .sources
+            .get(source_id)
+            .map(|s| s.name.clone())
+            .unwrap_or_else(|| "unknown".to_string());
+
+        // Extract EN2 range (only supported for computed merkle roots)
+        let full_en2_range = match &job_template.merkle_root {
+            MerkleRootKind::Computed(template) => template.extranonce2_range.clone(),
+            MerkleRootKind::Fixed(_) => {
+                error!(job_id = %job_template.id, "Header-only jobs not supported");
+                return;
+            }
+        };
+
+        let template = Arc::new(job_template);
+
+        // Cache job for newly-arriving threads
+        if let Some(source) = self.sources.get_mut(source_id) {
+            source.last_job = Some(template.clone());
+        }
+
+        // Skip assignment if no threads registered yet
+        if self.threads.is_empty() {
+            debug!(source = %source_name, "No threads yet, job cached for later");
+            return;
+        }
+
+        // Check if difficulty is reasonable for our hashrate (once per source)
+        if !self.difficulty_warned_sources.contains(&source_id) {
+            let hashrate = self.total_hashrate();
+            if warn_if_difficulty_too_high(&template, hashrate, &source_name) {
+                self.difficulty_warned_sources.insert(source_id);
+            }
+        }
+
+        // If replacing, invalidate old tasks for this source first
+        if matches!(mode, AssignMode::Replace) {
+            self.remove_tasks_where(share_channels, |e| e.source_id == source_id);
+        }
+
+        // Split EN2 range among all threads
+        let en2_slices = full_en2_range
+            .split(self.threads.len())
+            .expect("Failed to split EN2 range among threads");
+
+        // Assign work to all threads
+        for ((thread_id, thread), en2_range) in self.threads.iter_mut().zip(en2_slices) {
+            let starting_en2 = en2_range.iter().next();
+
+            // Create share channel for this task
+            let (share_tx, share_rx) = mpsc::channel(32);
+
+            let hash_task = HashTask {
+                template: template.clone(),
+                en2_range: Some(en2_range),
+                en2: starting_en2,
+                share_target: template.share_target,
+                ntime: template.time,
+                share_tx,
+            };
+
+            let result = match mode {
+                AssignMode::Update => thread.update_task(hash_task).await,
+                AssignMode::Replace => thread.replace_task(hash_task).await,
+            };
+
+            if let Err(e) = result {
+                error!(thread_id = ?thread_id, error = %e, "Failed to assign task");
+            } else {
+                let task_id = self.tasks.insert(TaskEntry {
+                    source_id,
+                    template: template.clone(),
+                    thread_id,
+                });
+                share_channels.insert(task_id, ReceiverStream::new(share_rx));
+            }
+        }
+    }
+
+    /// Handle ClearJobs event from a source.
+    fn handle_clear_jobs(&mut self, source_id: SourceId, share_channels: &mut ShareStream) {
+        let source_name = self
+            .sources
+            .get(source_id)
+            .map(|s| s.name.as_str())
+            .unwrap_or("unknown");
+        debug!(source = %source_name, "ClearJobs received");
+
+        // Clear cached job so newly-arriving threads don't get stale work
+        if let Some(source) = self.sources.get_mut(source_id) {
+            source.last_job = None;
+        }
+
+        // Remove tasks for this source (channels close, stale shares fail)
+        self.remove_tasks_where(share_channels, |e| e.source_id == source_id);
+    }
+
+    /// Handle a share arriving from a task's channel.
+    async fn handle_share(&mut self, task_id: TaskId, share: Share) {
+        // Look up task context for routing
+        let Some(task_entry) = self.tasks.get(task_id) else {
+            // Task was removed (ReplaceJob/ClearJobs) but share arrived
+            // before channel closed. This is normal; just drop the share.
+            trace!(task_id = ?task_id, "Share for removed task (dropped)");
+            return;
+        };
+
+        debug!(
+            task_id = ?task_id,
+            job_id = %task_entry.template.id,
+            nonce = format!("{:#x}", share.nonce),
+            hash = %share.hash,
+            "Share found"
+        );
+
+        // Track hashes for hashrate measurement (see MiningStats doc)
+        self.stats.total_hashes += share.expected_hashes;
+
+        // Extract nonce for potential trace logging (share consumed if submitted)
+        let nonce = share.nonce;
+
+        // Check if share meets source threshold
+        if task_entry.template.share_target.is_met_by(share.hash) {
+            self.stats.shares_submitted += 1;
+
+            // Submit share to originating source
+            if let Some(source) = self.sources.get(task_entry.source_id) {
+                let source_share = SourceShare::from((share, task_entry.template.id.clone()));
+
+                if let Err(e) = source
+                    .command_tx
+                    .send(SourceCommand::SubmitShare(source_share))
+                    .await
+                {
+                    error!(
+                        source_id = ?task_entry.source_id,
+                        error = %e,
+                        "Failed to submit share to source"
+                    );
+                } else {
+                    debug!(source = %source.name, "Share submitted to source");
+                }
+            } else {
+                error!(source_id = ?task_entry.source_id, "Share for unknown source");
+            }
+        } else {
+            trace!(
+                task_id = ?task_id,
+                nonce = format!("{:#x}", nonce),
+                "Share below source threshold (not submitted)"
+            );
+        }
+    }
+
+    /// Handle an event from a hash thread.
+    fn handle_thread_event(&mut self, thread_id: ThreadId, event: HashThreadEvent) {
+        match event {
+            HashThreadEvent::WorkExhausted { en2_searched } => {
+                info!(thread_id = ?thread_id, en2_searched, "Work exhausted");
+                // TODO: Assign new work to this thread
+            }
+
+            HashThreadEvent::WorkDepletionWarning {
+                estimated_remaining_ms,
+            } => {
+                debug!(thread_id = ?thread_id, remaining_ms = estimated_remaining_ms, "Work depletion warning");
+                // TODO: Prepare next work assignment
+            }
+
+            HashThreadEvent::StatusUpdate(status) => {
+                trace!(
+                    thread_id = ?thread_id,
+                    hashrate = %status.hashrate.to_human_readable(),
+                    active = status.is_active,
+                    "Thread status"
+                );
+            }
+        }
+    }
+
+    /// Handle a new thread arriving from the backplane.
+    async fn handle_new_thread(
+        &mut self,
+        mut thread: Box<dyn HashThread>,
+        thread_events: &mut ThreadEventStream,
+        share_channels: &mut ShareStream,
+    ) {
+        let event_rx = thread
+            .take_event_receiver()
+            .expect("Thread missing event receiver");
+
+        let thread_id = self.threads.insert(thread);
+        thread_events.insert(thread_id, ReceiverStream::new(event_rx));
+        debug!(thread_id = ?thread_id, "Thread registered");
+
+        // Broadcast updated hashrate to all sources
+        let hashrate = self.total_hashrate();
+        let senders = self.hashrate_senders();
+        broadcast_hashrate(senders, hashrate).await;
+
+        // Reset difficulty warnings since hashrate changed
+        self.difficulty_warned_sources.clear();
+
+        self.last_thread_count = thread_events.len();
+
+        // Assign cached jobs from all sources to the new thread
+        for (source_id, source) in self.sources.iter() {
+            let Some(template) = &source.last_job else {
+                continue;
+            };
+
+            // Extract full EN2 range (new thread overlaps with others)
+            let full_en2_range = match &template.merkle_root {
+                MerkleRootKind::Computed(t) => t.extranonce2_range.clone(),
+                MerkleRootKind::Fixed(_) => continue,
+            };
+
+            let (share_tx, share_rx) = mpsc::channel(32);
+            let hash_task = HashTask {
+                template: template.clone(),
+                en2_range: Some(full_en2_range.clone()),
+                en2: full_en2_range.iter().next(),
+                share_target: template.share_target,
+                ntime: template.time,
+                share_tx,
+            };
+
+            let thread = self
+                .threads
+                .get_mut(thread_id)
+                .expect("Just inserted thread");
+            if let Err(e) = thread.update_task(hash_task).await {
+                error!(thread_id = ?thread_id, error = %e, "Failed to assign cached job");
+            } else {
+                let task_id = self.tasks.insert(TaskEntry {
+                    source_id,
+                    template: template.clone(),
+                    thread_id,
+                });
+                share_channels.insert(task_id, ReceiverStream::new(share_rx));
+                debug!(
+                    thread_id = ?thread_id,
+                    source = %source.name,
+                    job_id = %template.id,
+                    "Assigned cached job to new thread"
+                );
+            }
+        }
+    }
+
+    /// Detect and handle thread disconnections.
+    async fn handle_thread_disconnections(
+        &mut self,
+        thread_events: &ThreadEventStream,
+        share_channels: &mut ShareStream,
+    ) {
+        let current_count = thread_events.len();
+        if current_count == self.last_thread_count {
+            return;
+        }
+
+        debug!(
+            previous = self.last_thread_count,
+            current = current_count,
+            "Thread count changed"
+        );
+
+        // Remove threads that no longer have active event streams
+        let active_thread_ids: HashSet<_> = thread_events.keys().collect();
+        self.threads.retain(|id, _| active_thread_ids.contains(&id));
+
+        // Remove tasks for disconnected threads
+        self.remove_tasks_where(share_channels, |e| {
+            !active_thread_ids.contains(&e.thread_id)
+        });
+
+        self.last_thread_count = current_count;
+
+        // Broadcast updated hashrate to all sources
+        let hashrate = self.total_hashrate();
+        let senders = self.hashrate_senders();
+        broadcast_hashrate(senders, hashrate).await;
+
+        // Reset difficulty warnings since hashrate changed
+        self.difficulty_warned_sources.clear();
+    }
+
+    /// Main scheduler loop.
+    async fn run(
+        &mut self,
+        running: CancellationToken,
+        mut thread_rx: mpsc::Receiver<Box<dyn HashThread>>,
+        mut source_reg_rx: mpsc::Receiver<SourceRegistration>,
+    ) {
+        // StreamMaps as locals (not in self) to avoid borrow conflicts in select!
+        let mut source_events: SourceEventStream = StreamMap::new();
+        let mut thread_events: ThreadEventStream = StreamMap::new();
+        let mut share_channels: ShareStream = StreamMap::new();
+
+        // Create interval for periodic status logging
+        let mut status_interval = tokio::time::interval(Duration::from_secs(30));
+        status_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut first_tick = true;
+
+        debug!("Scheduler ready (awaiting job sources)");
+
+        while !running.is_cancelled() {
+            tokio::select! {
+                // Source registration
+                Some(registration) = source_reg_rx.recv() => {
+                    self.handle_source_registration(registration, &mut source_events).await;
+                }
+
+                // Source events
+                Some((source_id, event)) = source_events.next() => {
+                    let source_name = self.sources.get(source_id)
+                        .map(|s| s.name.as_str())
+                        .unwrap_or("unknown");
+
+                    match event {
+                        SourceEvent::UpdateJob(job_template) => {
+                            debug!(
+                                source = %source_name,
+                                job_id = %job_template.id,
+                                "UpdateJob received"
+                            );
+                            self.assign_job_to_threads(
+                                AssignMode::Update,
+                                source_id,
+                                job_template,
+                                &mut share_channels,
+                            ).await;
+                        }
+
+                        SourceEvent::ReplaceJob(job_template) => {
+                            debug!(
+                                source = %source_name,
+                                job_id = %job_template.id,
+                                "ReplaceJob received"
+                            );
+                            self.assign_job_to_threads(
+                                AssignMode::Replace,
+                                source_id,
+                                job_template,
+                                &mut share_channels,
+                            ).await;
+                        }
+
+                        SourceEvent::ClearJobs => {
+                            self.handle_clear_jobs(source_id, &mut share_channels);
+                        }
+                    }
+                }
+
+                // Share channels (from tasks)
+                Some((task_id, share)) = share_channels.next() => {
+                    self.handle_share(task_id, share).await;
+                }
+
+                // Thread events
+                Some((thread_id, event)) = thread_events.next() => {
+                    self.handle_thread_event(thread_id, event);
+                }
+
+                // New thread from backplane
+                Some(thread) = thread_rx.recv() => {
+                    self.handle_new_thread(thread, &mut thread_events, &mut share_channels).await;
+                }
+
+                // Periodic status check
+                _ = status_interval.tick() => {
+                    if first_tick {
+                        first_tick = false;
+                    } else {
+                        self.stats.log_summary();
+                    }
+                }
+
+                // Shutdown
+                _ = running.cancelled() => {
+                    debug!("Scheduler shutdown requested");
+                    break;
+                }
+            }
+
+            // Detect thread disconnections (StreamMap silently removes ended streams)
+            self.handle_thread_disconnections(&thread_events, &mut share_channels)
+                .await;
+        }
+
+        // Log final statistics
+        self.stats.log_summary();
+
+        debug!("Scheduler shutdown complete");
+    }
 }
 
 /// Broadcasts hashrate update to all registered sources.
 ///
-/// Currently sends the same aggregate hashrate to all sources. In the future,
-/// this will send per-source allocations based on scheduling policy (e.g., when
-/// splitting hashrate across multiple pools).
-async fn broadcast_hashrate(sources: &SlotMap<SourceId, SourceEntry>, hashrate: HashRate) {
-    for source in sources.values() {
-        let _ = source
-            .command_tx
-            .send(SourceCommand::UpdateHashRate(hashrate))
-            .await;
+/// Takes pre-collected senders to avoid capturing Scheduler across await
+/// points (it contains Box<dyn HashThread> which isn't Sync).
+async fn broadcast_hashrate(senders: Vec<mpsc::Sender<SourceCommand>>, hashrate: HashRate) {
+    for sender in senders {
+        let _ = sender.send(SourceCommand::UpdateHashRate(hashrate)).await;
     }
 }
 
@@ -136,7 +643,7 @@ const HIGH_DIFFICULTY_THRESHOLD: Duration = Duration::from_secs(300); // 5 minut
 /// Returns `true` if warning was triggered, so caller can track and avoid
 /// repeated warnings.
 fn warn_if_difficulty_too_high(job: &JobTemplate, hashrate: HashRate, source_name: &str) -> bool {
-    if hashrate.0 == 0 {
+    if hashrate.is_zero() {
         return false; // Can't calculate without hashrate
     }
 
@@ -156,444 +663,14 @@ fn warn_if_difficulty_too_high(job: &JobTemplate, hashrate: HashRate, source_nam
     }
 }
 
-// TODO: Future enhancements for frequency ramping:
-// - Make ramp parameters configurable (step size, delay, target)
-// - Monitor chip temperature/errors during ramp
-// - Coordinate with board-level voltage regulators
-// - Implement adaptive ramping based on chip response
-// - Add rollback on errors during ramp
-
 /// Run the scheduler task, receiving hash threads and job sources.
 pub async fn task(
     running: CancellationToken,
-    mut thread_rx: mpsc::Receiver<Box<dyn HashThread>>,
-    mut source_reg_rx: mpsc::Receiver<SourceRegistration>,
+    thread_rx: mpsc::Receiver<Box<dyn HashThread>>,
+    source_reg_rx: mpsc::Receiver<SourceRegistration>,
 ) {
-    // Source storage and event multiplexing
-    let mut sources: SlotMap<SourceId, SourceEntry> = SlotMap::new();
-    let mut source_events: StreamMap<SourceId, ReceiverStream<SourceEvent>> = StreamMap::new();
-
-    // Thread storage and event multiplexing
-    let mut threads: SlotMap<ThreadId, Box<dyn HashThread>> = SlotMap::new();
-    let mut thread_events: StreamMap<ThreadId, ReceiverStream<HashThreadEvent>> = StreamMap::new();
-
-    // Task bookkeeping: each task gets an entry and a share channel
-    let mut tasks: SlotMap<TaskId, TaskEntry> = SlotMap::new();
-    let mut share_channels: StreamMap<TaskId, ReceiverStream<Share>> = StreamMap::new();
-
-    // Track mining statistics
-    let mut stats = MiningStats::default();
-
-    // Create interval for periodic status logging
-    let mut status_interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
-    status_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut first_tick = true;
-
-    debug!("Scheduler ready (awaiting job sources)");
-
-    // Track thread count to detect disconnections
-    let mut last_thread_count = threads.len();
-
-    // Track sources we've warned about high difficulty (reset on hashrate change)
-    let mut difficulty_warned_sources: HashSet<SourceId> = HashSet::new();
-
-    // Main scheduler loop
-
-    while !running.is_cancelled() {
-        tokio::select! {
-            // Source registration
-            Some(registration) = source_reg_rx.recv() => {
-                let source_id = sources.insert(SourceEntry {
-                    name: registration.name.clone(),
-                    command_tx: registration.command_tx,
-                    last_job: None,
-                });
-                source_events.insert(source_id, ReceiverStream::new(registration.event_rx));
-                debug!(source_id = ?source_id, name = %registration.name, "Source registered");
-
-                // Send current hashrate estimate to the new source
-                let hashrate = total_hashrate_estimate(&threads);
-                if let Some(source) = sources.get(source_id) {
-                    let _ = source.command_tx.send(SourceCommand::UpdateHashRate(hashrate)).await;
-                }
-            }
-
-            // Source events
-            Some((source_id, event)) = source_events.next() => {
-                // Clone source name upfront to avoid borrow conflicts with caching
-                let source_name = sources.get(source_id)
-                    .expect("StreamMap returned invalid source_id")
-                    .name.clone();
-
-                // TODO: Factor out common job assignment logic (EN2 extraction, ActiveJob
-                // creation, range splitting, work assignment) into helper function
-                match event {
-                    SourceEvent::UpdateJob(job_template) => {
-                        debug!(
-                            source = %source_name,
-                            job_id = %job_template.id,
-                            "UpdateJob received"
-                        );
-
-                        // Extract EN2 range (only supported for computed merkle roots)
-                        let full_en2_range = match &job_template.merkle_root {
-                            MerkleRootKind::Computed(template) => template.extranonce2_range.clone(),
-                            MerkleRootKind::Fixed(_) => {
-                                error!(job_id = %job_template.id, "Header-only jobs not supported");
-                                continue;
-                            }
-                        };
-
-                        let template = Arc::new(job_template);
-
-                        // Cache job for newly-arriving threads
-                        if let Some(source) = sources.get_mut(source_id) {
-                            source.last_job = Some(template.clone());
-                        }
-
-                        // Skip assignment if no threads registered yet
-                        if threads.is_empty() {
-                            debug!(source = %source_name, "No threads yet, job cached for later");
-                            continue;
-                        }
-
-                        // Check if difficulty is reasonable for our hashrate (once per source)
-                        if !difficulty_warned_sources.contains(&source_id) {
-                            let hashrate = total_hashrate_estimate(&threads);
-                            if warn_if_difficulty_too_high(&template, hashrate, &source_name) {
-                                difficulty_warned_sources.insert(source_id);
-                            }
-                        }
-
-                        // Split EN2 range among all threads
-                        let en2_slices = full_en2_range.split(threads.len())
-                            .expect("Failed to split EN2 range among threads");
-
-                        // Assign work to all threads (old tasks remain valid)
-                        for ((thread_id, thread), en2_range) in threads.iter_mut().zip(en2_slices) {
-                            let starting_en2 = en2_range.iter().next();
-
-                            // Create share channel for this task
-                            let (share_tx, share_rx) = mpsc::channel(32);
-
-                            let hash_task = HashTask {
-                                template: template.clone(),
-                                en2_range: Some(en2_range),
-                                en2: starting_en2,
-                                share_target: template.share_target,
-                                ntime: template.time,
-                                share_tx,
-                            };
-
-                            if let Err(e) = thread.update_task(hash_task).await {
-                                error!(thread_id = ?thread_id, error = %e, "Failed to assign task");
-                            } else {
-                                // Register task in scheduler (old tasks stay active)
-                                let task_id = tasks.insert(TaskEntry {
-                                    source_id,
-                                    template: template.clone(),
-                                    thread_id,
-                                });
-                                share_channels.insert(task_id, ReceiverStream::new(share_rx));
-                            }
-                        }
-                    }
-
-                    SourceEvent::ReplaceJob(job_template) => {
-                        debug!(
-                            source = %source_name,
-                            job_id = %job_template.id,
-                            "ReplaceJob received"
-                        );
-
-                        // Extract EN2 range (only supported for computed merkle roots)
-                        let full_en2_range = match &job_template.merkle_root {
-                            MerkleRootKind::Computed(template) => template.extranonce2_range.clone(),
-                            MerkleRootKind::Fixed(_) => {
-                                error!(job_id = %job_template.id, "Header-only jobs not supported");
-                                continue;
-                            }
-                        };
-
-                        let template = Arc::new(job_template);
-
-                        // Cache job for newly-arriving threads
-                        if let Some(source) = sources.get_mut(source_id) {
-                            source.last_job = Some(template.clone());
-                        }
-
-                        // Skip assignment if no threads registered yet
-                        if threads.is_empty() {
-                            debug!(source = %source_name, "No threads yet, job cached for later");
-                            continue;
-                        }
-
-                        // Check if difficulty is reasonable for our hashrate (once per source)
-                        if !difficulty_warned_sources.contains(&source_id) {
-                            let hashrate = total_hashrate_estimate(&threads);
-                            if warn_if_difficulty_too_high(&template, hashrate, &source_name) {
-                                difficulty_warned_sources.insert(source_id);
-                            }
-                        }
-
-                        // Invalidate old tasks for this source (close channels, stale shares fail)
-                        let old_task_ids: Vec<TaskId> = tasks
-                            .iter()
-                            .filter(|(_, entry)| entry.source_id == source_id)
-                            .map(|(id, _)| id)
-                            .collect();
-                        for task_id in old_task_ids {
-                            tasks.remove(task_id);
-                            share_channels.remove(&task_id);
-                        }
-
-                        // Split EN2 range among all threads
-                        let en2_slices = full_en2_range.split(threads.len())
-                            .expect("Failed to split EN2 range among threads");
-
-                        // Replace work on all threads (old shares invalid)
-                        for ((thread_id, thread), en2_range) in threads.iter_mut().zip(en2_slices) {
-                            let starting_en2 = en2_range.iter().next();
-
-                            // Create share channel for this task
-                            let (share_tx, share_rx) = mpsc::channel(32);
-
-                            let hash_task = HashTask {
-                                template: template.clone(),
-                                en2_range: Some(en2_range),
-                                en2: starting_en2,
-                                share_target: template.share_target,
-                                ntime: template.time,
-                                share_tx,
-                            };
-
-                            if let Err(e) = thread.replace_task(hash_task).await {
-                                error!(thread_id = ?thread_id, error = %e, "Failed to replace task");
-                            } else {
-                                // Register new task
-                                let task_id = tasks.insert(TaskEntry {
-                                    source_id,
-                                    template: template.clone(),
-                                    thread_id,
-                                });
-                                share_channels.insert(task_id, ReceiverStream::new(share_rx));
-                            }
-                        }
-                    }
-
-                    SourceEvent::ClearJobs => {
-                        debug!(source = %source_name, "ClearJobs received");
-
-                        // Clear cached job so newly-arriving threads don't get stale work
-                        if let Some(source) = sources.get_mut(source_id) {
-                            source.last_job = None;
-                        }
-
-                        // Remove tasks for this source (channels close, stale shares fail)
-                        // Don't idle threads---they continue with current work until
-                        // it's exhausted or new work arrives from another source
-                        let old_task_ids: Vec<TaskId> = tasks
-                            .iter()
-                            .filter(|(_, entry)| entry.source_id == source_id)
-                            .map(|(id, _)| id)
-                            .collect();
-                        for task_id in old_task_ids {
-                            tasks.remove(task_id);
-                            share_channels.remove(&task_id);
-                        }
-                    }
-                }
-            }
-
-            // Share channels (from tasks)
-            Some((task_id, share)) = share_channels.next() => {
-                // Look up task context for routing
-                let Some(task_entry) = tasks.get(task_id) else {
-                    // Task was removed (ReplaceJob/ClearJobs) but share arrived
-                    // before channel closed. This is normal; just drop the share.
-                    trace!(task_id = ?task_id, "Share for removed task (dropped)");
-                    continue;
-                };
-
-                debug!(
-                    task_id = ?task_id,
-                    job_id = %task_entry.template.id,
-                    nonce = format!("{:#x}", share.nonce),
-                    hash = %share.hash,
-                    "Share found"
-                );
-
-                // Track hashes for hashrate measurement (see MiningStats doc)
-                stats.total_hashes += share.expected_hashes;
-
-                // Check if share meets source threshold
-                if task_entry.template.share_target.is_met_by(share.hash) {
-                    stats.shares_submitted += 1;
-
-                    // Submit share to originating source
-                    if let Some(source) = sources.get(task_entry.source_id) {
-                        let source_share = SourceShare::from((share, task_entry.template.id.clone()));
-
-                        if let Err(e) = source.command_tx.send(SourceCommand::SubmitShare(source_share)).await {
-                            error!(
-                                source_id = ?task_entry.source_id,
-                                error = %e,
-                                "Failed to submit share to source"
-                            );
-                        } else {
-                            debug!(source = %source.name, "Share submitted to source");
-                        }
-                    } else {
-                        error!(source_id = ?task_entry.source_id, "Share for unknown source");
-                    }
-                } else {
-                    trace!(
-                        task_id = ?task_id,
-                        nonce = format!("{:#x}", share.nonce),
-                        "Share below source threshold (not submitted)"
-                    );
-                }
-            }
-
-            // Thread events
-            Some((thread_id, event)) = thread_events.next() => {
-                match event {
-                    HashThreadEvent::WorkExhausted { en2_searched } => {
-                        info!(thread_id = ?thread_id, en2_searched, "Work exhausted");
-                        // TODO: Assign new work to this thread
-                    }
-
-                    HashThreadEvent::WorkDepletionWarning { estimated_remaining_ms } => {
-                        debug!(thread_id = ?thread_id, remaining_ms = estimated_remaining_ms, "Work depletion warning");
-                        // TODO: Prepare next work assignment
-                    }
-
-                    HashThreadEvent::StatusUpdate(status) => {
-                        trace!(
-                            thread_id = ?thread_id,
-                            hashrate = %status.hashrate.to_human_readable(),
-                            active = status.is_active,
-                            "Thread status"
-                        );
-                    }
-                }
-            }
-
-            // New thread from backplane
-            Some(mut thread) = thread_rx.recv() => {
-                let event_rx = thread
-                    .take_event_receiver()
-                    .expect("Thread missing event receiver");
-
-                let thread_id = threads.insert(thread);
-                thread_events.insert(thread_id, ReceiverStream::new(event_rx));
-                debug!(thread_id = ?thread_id, "Thread registered");
-
-                // Broadcast updated hashrate to all sources
-                let hashrate = total_hashrate_estimate(&threads);
-                broadcast_hashrate(&sources, hashrate).await;
-
-                // Reset difficulty warnings since hashrate changed
-                difficulty_warned_sources.clear();
-
-                last_thread_count = thread_events.len();
-
-                // Assign cached jobs from all sources to the new thread
-                for (source_id, source) in sources.iter() {
-                    let Some(template) = &source.last_job else { continue };
-
-                    // Extract full EN2 range (new thread overlaps with others)
-                    let full_en2_range = match &template.merkle_root {
-                        MerkleRootKind::Computed(t) => t.extranonce2_range.clone(),
-                        MerkleRootKind::Fixed(_) => continue,
-                    };
-
-                    let (share_tx, share_rx) = mpsc::channel(32);
-                    let hash_task = HashTask {
-                        template: template.clone(),
-                        en2_range: Some(full_en2_range.clone()),
-                        en2: full_en2_range.iter().next(),
-                        share_target: template.share_target,
-                        ntime: template.time,
-                        share_tx,
-                    };
-
-                    let thread = threads.get_mut(thread_id).expect("Just inserted thread");
-                    if let Err(e) = thread.update_task(hash_task).await {
-                        error!(thread_id = ?thread_id, error = %e, "Failed to assign cached job");
-                    } else {
-                        let task_id = tasks.insert(TaskEntry {
-                            source_id,
-                            template: template.clone(),
-                            thread_id,
-                        });
-                        share_channels.insert(task_id, ReceiverStream::new(share_rx));
-                        debug!(
-                            thread_id = ?thread_id,
-                            source = %source.name,
-                            job_id = %template.id,
-                            "Assigned cached job to new thread"
-                        );
-                    }
-                }
-            }
-
-            // Periodic status check
-            _ = status_interval.tick() => {
-                if first_tick {
-                    first_tick = false;
-                } else {
-                    stats.log_summary();
-                }
-            }
-
-            // Shutdown
-            _ = running.cancelled() => {
-                debug!("Scheduler shutdown requested");
-                break;
-            }
-        }
-
-        // Detect thread disconnections (StreamMap silently removes ended streams)
-        // Check thread_events since that's where disconnections are detected.
-        let current_count = thread_events.len();
-        if current_count != last_thread_count {
-            debug!(
-                previous = last_thread_count,
-                current = current_count,
-                "Thread count changed"
-            );
-
-            // Remove threads that no longer have active event streams
-            let active_thread_ids: HashSet<_> = thread_events.keys().collect();
-            threads.retain(|id, _| active_thread_ids.contains(&id));
-
-            // Remove tasks for disconnected threads
-            let stale_task_ids: Vec<TaskId> = tasks
-                .iter()
-                .filter(|(_, entry)| !active_thread_ids.contains(&entry.thread_id))
-                .map(|(id, _)| id)
-                .collect();
-            for task_id in stale_task_ids {
-                tasks.remove(task_id);
-                share_channels.remove(&task_id);
-            }
-
-            last_thread_count = current_count;
-
-            // Broadcast updated hashrate to all sources
-            let hashrate = total_hashrate_estimate(&threads);
-            broadcast_hashrate(&sources, hashrate).await;
-
-            // Reset difficulty warnings since hashrate changed
-            difficulty_warned_sources.clear();
-        }
-    }
-
-    // Log final statistics
-    stats.log_summary();
-
-    debug!("Scheduler shutdown complete");
+    let mut scheduler = Scheduler::new();
+    scheduler.run(running, thread_rx, source_reg_rx).await;
 }
 
 /// Format seconds as human-readable duration.
@@ -647,6 +724,7 @@ fn format_duration(secs: u64) -> String {
 /// Using achieved difficulty introduces high variance from outliers. One lucky
 /// difficulty-10M share would dominate the average, incorrectly inflating
 /// hashrate estimates. Threshold-based calculation is variance-minimizing.
+#[derive(Debug)]
 struct MiningStats {
     start_time: std::time::Instant,
     /// Total hashes performed (accumulated across all shares).
