@@ -95,7 +95,7 @@ impl Daemon {
 
             source_reg_tx
                 .send(SourceRegistration {
-                    name: "stratum-v1".into(),
+                    name: stratum_source.name(),
                     event_rx: source_event_rx,
                     command_tx: source_cmd_tx,
                 })

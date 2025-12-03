@@ -82,6 +82,17 @@ impl StratumV1Source {
         }
     }
 
+    /// Human-readable name derived from pool URL (e.g., "solo.ckpool.org:3333").
+    pub fn name(&self) -> String {
+        self.config
+            .url
+            .strip_prefix("stratum+tcp://")
+            .or_else(|| self.config.url.strip_prefix("stratum://"))
+            .or_else(|| self.config.url.strip_prefix("tcp://"))
+            .unwrap_or(&self.config.url)
+            .to_string()
+    }
+
     /// Convert Stratum JobNotification to JobTemplate.
     fn job_to_template(&self, job: JobNotification) -> Result<JobTemplate> {
         let state = self
