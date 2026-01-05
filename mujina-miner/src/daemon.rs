@@ -43,9 +43,13 @@ impl Daemon {
         let (source_reg_tx, source_reg_rx) = mpsc::channel::<SourceRegistration>(10);
 
         // Create and start USB transport discovery
-        let usb_transport = UsbTransport::new(transport_tx.clone());
-        if let Err(e) = usb_transport.start_discovery(self.shutdown.clone()).await {
-            error!("Failed to start USB discovery: {}", e);
+        if std::env::var("MUJINA_USB_DISABLE").is_err() {
+            let usb_transport = UsbTransport::new(transport_tx.clone());
+            if let Err(e) = usb_transport.start_discovery(self.shutdown.clone()).await {
+                error!("Failed to start USB discovery: {}", e);
+            }
+        } else {
+            info!("USB discovery disabled (MUJINA_USB_DISABLE set)");
         }
 
         // Create and start backplane
