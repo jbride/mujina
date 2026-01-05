@@ -60,6 +60,12 @@ impl From<HashRate> for f64 {
     }
 }
 
+impl std::fmt::Display for HashRate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.to_human_readable())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
