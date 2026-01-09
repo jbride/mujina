@@ -15,6 +15,9 @@ impl U256 {
     /// Zero constant.
     pub const ZERO: Self = Self(Ruint256::ZERO);
 
+    /// Maximum value (2^256 - 1).
+    pub const MAX: Self = Self(Ruint256::MAX);
+
     /// Create from little-endian bytes.
     pub fn from_le_bytes(bytes: [u8; 32]) -> Self {
         Self(Ruint256::from_le_bytes(bytes))
@@ -74,6 +77,14 @@ impl Div<u64> for U256 {
     type Output = Self;
 
     fn div(self, rhs: u64) -> Self::Output {
+        Self(self.0 / Ruint256::from(rhs))
+    }
+}
+
+impl Div<u128> for U256 {
+    type Output = Self;
+
+    fn div(self, rhs: u128) -> Self::Output {
         Self(self.0 / Ruint256::from(rhs))
     }
 }

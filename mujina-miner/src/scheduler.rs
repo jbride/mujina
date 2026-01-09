@@ -43,7 +43,9 @@ use crate::job_source::{
     JobTemplate, MerkleRootKind, Share as SourceShare, SourceCommand, SourceEvent,
 };
 use crate::tracing::prelude::*;
-use crate::types::{expected_time_to_share_from_target, HashRate};
+use crate::types::{
+    expected_time_to_share_from_target, target_for_share_rate, HashRate, ShareRate, Target,
+};
 use crate::u256::U256;
 
 /// Unique identifier for a job source, assigned by the scheduler.
@@ -93,6 +95,9 @@ pub struct SourceRegistration {
 
     /// Command sender for this source (SubmitShare, etc.)
     pub command_tx: mpsc::Sender<SourceCommand>,
+
+    /// Maximum average share submission rate for this source.
+    pub max_share_rate: Option<ShareRate>,
 }
 
 /// Internal scheduler tracking for a registered source.
@@ -106,6 +111,9 @@ struct SourceEntry {
 
     /// Last job received from this source (for assigning to newly-arriving threads)
     last_job: Option<Arc<JobTemplate>>,
+
+    /// Maximum average share submission rate for this source.
+    max_share_rate: Option<ShareRate>,
 }
 
 /// Whether to update alongside existing work or replace it.
@@ -164,6 +172,29 @@ impl Scheduler {
         HashRate(total)
     }
 
+    /// Compute the share_target for a HashTask.
+    ///
+    /// Applies the source's rate limit (if any) to avoid flooding. Returns
+    /// the harder of the source's target or the rate-limited target.
+    fn compute_share_target(
+        max_share_rate: Option<ShareRate>,
+        hashrate: HashRate,
+        source_target: Target,
+    ) -> Target {
+        let Some(max_rate) = max_share_rate else {
+            return source_target;
+        };
+
+        if hashrate.is_zero() {
+            return source_target;
+        }
+
+        let rate_limit_target = target_for_share_rate(max_rate, hashrate);
+
+        // Return the harder target (smaller value = higher difficulty)
+        std::cmp::min(source_target, rate_limit_target)
+    }
+
     /// Collects hashrate command senders from all sources.
     ///
     /// Used with `broadcast_hashrate()` to avoid capturing `&self` across
@@ -204,6 +235,7 @@ impl Scheduler {
             name: registration.name.clone(),
             command_tx: registration.command_tx,
             last_job: None,
+            max_share_rate: registration.max_share_rate,
         });
         source_events.insert(source_id, ReceiverStream::new(registration.event_rx));
         debug!(source_id = ?source_id, name = %registration.name, "Source registered");
@@ -270,6 +302,12 @@ impl Scheduler {
             .split(self.threads.len())
             .expect("Failed to split EN2 range among threads");
 
+        // Compute share_target with rate limiting applied
+        let max_share_rate = self.sources.get(source_id).and_then(|s| s.max_share_rate);
+        let hashrate = self.total_hashrate();
+        let share_target =
+            Self::compute_share_target(max_share_rate, hashrate, template.share_target);
+
         // Assign work to all threads
         for ((thread_id, thread), en2_range) in self.threads.iter_mut().zip(en2_slices) {
             let starting_en2 = en2_range.iter().next();
@@ -281,7 +319,7 @@ impl Scheduler {
                 template: template.clone(),
                 en2_range: Some(en2_range),
                 en2: starting_en2,
-                share_target: template.share_target,
+                share_target,
                 ntime: template.time,
                 share_tx,
             };
@@ -437,6 +475,9 @@ impl Scheduler {
 
         self.last_thread_count = thread_events.len();
 
+        // Compute hashrate once for all sources
+        let hashrate = self.total_hashrate();
+
         // Assign cached jobs from all sources to the new thread
         for (source_id, source) in self.sources.iter() {
             let Some(template) = &source.last_job else {
@@ -449,12 +490,16 @@ impl Scheduler {
                 MerkleRootKind::Fixed(_) => continue,
             };
 
+            // Compute share_target with rate limiting applied
+            let share_target =
+                Self::compute_share_target(source.max_share_rate, hashrate, template.share_target);
+
             let (share_tx, share_rx) = mpsc::channel(32);
             let hash_task = HashTask {
                 template: template.clone(),
                 en2_range: Some(full_en2_range.clone()),
                 en2: full_en2_range.iter().next(),
-                share_target: template.share_target,
+                share_target,
                 ntime: template.time,
                 share_tx,
             };

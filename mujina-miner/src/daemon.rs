@@ -17,7 +17,7 @@ use crate::{
     cpu_miner::CpuMinerConfig,
     job_source::{dummy::DummySource, stratum_v1::StratumV1Source, SourceEvent},
     scheduler::{self, SourceRegistration},
-    stratum_v1::PoolConfig as StratumPoolConfig,
+    stratum_v1::{PoolConfig as StratumPoolConfig, FLOOD_PREVENTION_CAP},
     transport::{cpu as cpu_transport, CpuDeviceInfo, TransportEvent, UsbTransport},
 };
 
@@ -124,6 +124,7 @@ impl Daemon {
                     name: stratum_source.name(),
                     event_rx: source_event_rx,
                     command_tx: source_cmd_tx,
+                    max_share_rate: Some(FLOOD_PREVENTION_CAP),
                 })
                 .await?;
 
@@ -148,6 +149,7 @@ impl Daemon {
                     name: "dummy".into(),
                     event_rx: source_event_rx,
                     command_tx: source_cmd_tx,
+                    max_share_rate: Some(FLOOD_PREVENTION_CAP),
                 })
                 .await?;
 
