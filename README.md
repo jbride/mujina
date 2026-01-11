@@ -88,11 +88,18 @@ macOS support is planned, but USB discovery using IOKit is not yet implemented.
 
 ## Building
 
-```bash
-# Build the workspace
-cargo build
+A [justfile](https://github.com/casey/just) provides common development tasks:
 
-# Run unit tests (no hardware required)
+```bash
+just test      # Run unit tests (no hardware required)
+just run       # Build and run the miner
+just checks    # Run all checks (fmt, lint, test)
+```
+
+Or use cargo directly:
+
+```bash
+cargo build
 cargo test
 ```
 
