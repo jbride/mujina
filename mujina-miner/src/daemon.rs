@@ -3,6 +3,8 @@
 //! This module handles the core daemon functionality including initialization,
 //! task management, signal handling, and graceful shutdown.
 
+use std::env;
+
 use tokio::signal::unix::{self, SignalKind};
 use tokio::sync::mpsc;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
@@ -72,11 +74,11 @@ impl Daemon {
         let (source_event_tx, source_event_rx) = mpsc::channel::<SourceEvent>(100);
         let (source_cmd_tx, source_cmd_rx) = mpsc::channel(10);
 
-        if let Ok(pool_url) = std::env::var("MUJINA_POOL_URL") {
+        if let Ok(pool_url) = env::var("MUJINA_POOL_URL") {
             // Use Stratum v1 source
             let pool_user =
-                std::env::var("MUJINA_POOL_USER").unwrap_or_else(|_| "mujina-testing".to_string());
-            let pool_pass = std::env::var("MUJINA_POOL_PASS").unwrap_or_else(|_| "x".to_string());
+                env::var("MUJINA_POOL_USER").unwrap_or_else(|_| "mujina-testing".to_string());
+            let pool_pass = env::var("MUJINA_POOL_PASS").unwrap_or_else(|_| "x".to_string());
 
             let stratum_config = StratumPoolConfig {
                 url: pool_url,
