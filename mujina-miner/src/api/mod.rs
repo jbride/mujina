@@ -9,6 +9,9 @@
 
 mod v1;
 
+// Re-export types for use by other modules
+pub use v1::{AppState, FailedBoardStatus};
+
 use anyhow::Result;
 use axum::Router;
 use tokio::net::TcpListener;
@@ -37,8 +40,8 @@ impl Default for ApiConfig {
 /// This function starts the HTTP API server and runs until the provided
 /// cancellation token is triggered. It binds to localhost only by default for
 /// security.
-pub async fn serve(config: ApiConfig, shutdown: CancellationToken) -> Result<()> {
-    let app = build_router();
+pub async fn serve(config: ApiConfig, state: AppState, shutdown: CancellationToken) -> Result<()> {
+    let app = build_router(state);
 
     let listener = TcpListener::bind(&config.bind_addr).await?;
     let actual_addr = listener.local_addr()?;
@@ -65,8 +68,8 @@ pub async fn serve(config: ApiConfig, shutdown: CancellationToken) -> Result<()>
 }
 
 /// Build the application router with all API routes.
-fn build_router() -> Router {
-    Router::new().nest("/api/v1", v1::routes()).layer(
+fn build_router(state: AppState) -> Router {
+    Router::new().nest("/api/v1", v1::routes(state)).layer(
         TraceLayer::new_for_http()
             .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
             .on_response(DefaultOnResponse::new().level(Level::INFO)),

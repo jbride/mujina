@@ -146,6 +146,15 @@ impl BitaxeBoard {
     /// GPIO pin number for ASIC reset control (active low)
     const ASIC_RESET_PIN: u8 = 0;
 
+    /// Get the voltage regulator handle for API access.
+    ///
+    /// Returns a cloned Arc to the regulator if available, allowing the API
+    /// to control voltage dynamically. Returns None if the regulator is not
+    /// initialized.
+    pub fn get_voltage_regulator(&self) -> Option<Arc<Mutex<Tps546<BitaxeRawI2c>>>> {
+        self.regulator.clone()
+    }
+
     /// Bitaxe Gamma board configuration
     /// The Gamma uses a BM1370 chip and runs at 1Mbps after initialization
     #[expect(dead_code, reason = "will be used when baud rate change is fixed")]
@@ -802,6 +811,12 @@ impl BitaxeBoard {
         });
 
         self.stats_task_handle = Some(handle);
+    }
+}
+
+impl crate::board::AsAny for BitaxeBoard {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
 

@@ -43,6 +43,9 @@ impl Daemon {
 
     /// Run the daemon until shutdown is requested.
     pub async fn run(self) -> anyhow::Result<()> {
+        // Create shared API state
+        let api_state = api::AppState::new();
+
         // Create channels for component communication
         let (transport_tx, transport_rx) = mpsc::channel::<TransportEvent>(100);
         let (thread_tx, thread_rx) = mpsc::channel::<Box<dyn HashThread>>(10);
@@ -78,7 +81,7 @@ impl Daemon {
         }
 
         // Create and start backplane
-        let mut backplane = Backplane::new(transport_rx, thread_tx);
+        let mut backplane = Backplane::new(transport_rx, thread_tx, api_state.clone());
         self.tracker.spawn({
             let shutdown = self.shutdown.clone();
             async move {
@@ -228,9 +231,10 @@ impl Daemon {
         // Start the API server
         self.tracker.spawn({
             let shutdown = self.shutdown.clone();
+            let state = api_state.clone();
             async move {
                 let config = ApiConfig::default();
-                if let Err(e) = api::serve(config, shutdown).await {
+                if let Err(e) = api::serve(config, state, shutdown).await {
                     error!("API server error: {}", e);
                 }
             }

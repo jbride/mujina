@@ -5,7 +5,7 @@
 
 use async_trait::async_trait;
 
-use super::{Board, BoardError, BoardInfo, VirtualBoardDescriptor};
+use super::{AsAny, Board, BoardError, BoardInfo, VirtualBoardDescriptor};
 use crate::{
     asic::hash_thread::HashThread,
     cpu_miner::{CpuHashThread, CpuMinerConfig},
@@ -31,6 +31,12 @@ impl CpuBoard {
             config,
             threads: Vec::new(),
         }
+    }
+}
+
+impl AsAny for CpuBoard {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
 

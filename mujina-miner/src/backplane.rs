@@ -6,6 +6,7 @@
 //! lifecycle (hotplug, emergency shutdown, etc.).
 
 use crate::{
+    api::{AppState, FailedBoardStatus},
     asic::hash_thread::HashThread,
     board::{Board, BoardDescriptor, VirtualBoardRegistry},
     error::Result,
@@ -15,8 +16,17 @@ use crate::{
         TransportEvent, UsbDeviceInfo,
     },
 };
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Duration};
 use tokio::sync::mpsc;
+
+/// Get board initialization timeout from environment or use default.
+fn get_board_init_timeout() -> Duration {
+    std::env::var("MUJINA_BOARD_INIT_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(Duration::from_secs(30))
+}
 
 /// Board registry that uses inventory to find registered boards.
 pub struct BoardRegistry;
@@ -49,6 +59,8 @@ pub struct Backplane {
     event_rx: mpsc::Receiver<TransportEvent>,
     /// Channel to send hash threads to the scheduler
     scheduler_tx: mpsc::Sender<Box<dyn HashThread>>,
+    /// Shared API state for registering board controllers
+    api_state: AppState,
 }
 
 impl Backplane {
@@ -56,6 +68,7 @@ impl Backplane {
     pub fn new(
         event_rx: mpsc::Receiver<TransportEvent>,
         scheduler_tx: mpsc::Sender<Box<dyn HashThread>>,
+        api_state: AppState,
     ) -> Self {
         Self {
             registry: BoardRegistry,
@@ -63,6 +76,7 @@ impl Backplane {
             boards: HashMap::new(),
             event_rx,
             scheduler_tx,
+            api_state,
         }
     }
 
@@ -129,15 +143,75 @@ impl Backplane {
                     "Hash board connected via USB."
                 );
 
-                // Create the board using the descriptor's factory function
-                let mut board = match (descriptor.create_fn)(device_info).await {
-                    Ok(board) => board,
-                    Err(e) => {
+                // Capture info needed for error reporting before moving device_info
+                let board_name = descriptor.name;
+                let serial_for_error = device_info.serial_number.clone();
+
+                // Create the board using the descriptor's factory function with timeout
+                let timeout = get_board_init_timeout();
+                debug!(
+                    board = board_name,
+                    timeout_secs = timeout.as_secs(),
+                    "Starting board initialization with timeout"
+                );
+
+                // Spawn the initialization task so we can truly abandon it on timeout
+                let create_task = tokio::spawn((descriptor.create_fn)(device_info));
+
+                let mut board = match tokio::time::timeout(timeout, create_task).await {
+                    Ok(Ok(Ok(board))) => board,
+                    Ok(Ok(Err(e))) => {
                         error!(
-                            board = descriptor.name,
+                            board = board_name,
                             error = %e,
                             "Failed to create board"
                         );
+
+                        // Register the failed board
+                        self.api_state
+                            .register_failed_board(FailedBoardStatus {
+                                model: Some(board_name.to_string()),
+                                serial_number: serial_for_error.clone(),
+                                error: format!("Failed to create board: {}", e),
+                            })
+                            .await;
+
+                        return Ok(());
+                    }
+                    Ok(Err(join_error)) => {
+                        error!(
+                            board = board_name,
+                            error = %join_error,
+                            "Board initialization task panicked"
+                        );
+
+                        // Register the failed board
+                        self.api_state
+                            .register_failed_board(FailedBoardStatus {
+                                model: Some(board_name.to_string()),
+                                serial_number: serial_for_error.clone(),
+                                error: format!("Board initialization task panicked: {}", join_error),
+                            })
+                            .await;
+
+                        return Ok(());
+                    }
+                    Err(_) => {
+                        error!(
+                            board = board_name,
+                            timeout_secs = timeout.as_secs(),
+                            "Board initialization timed out (task abandoned)"
+                        );
+
+                        // Register the failed board due to timeout
+                        self.api_state
+                            .register_failed_board(FailedBoardStatus {
+                                model: Some(board_name.to_string()),
+                                serial_number: serial_for_error,
+                                error: format!("Board initialization timed out after {} seconds", timeout.as_secs()),
+                            })
+                            .await;
+
                         return Ok(());
                     }
                 };
@@ -147,6 +221,32 @@ impl Backplane {
                     .serial_number
                     .clone()
                     .unwrap_or_else(|| "unknown".to_string());
+
+                debug!(
+                    model = %board_info.model,
+                    serial = %board_id,
+                    "Board created successfully, registering with API"
+                );
+
+                // Register board information with API
+                self.api_state
+                    .register_board(board_id.clone(), board_info.clone())
+                    .await;
+
+                // Register voltage controller with API if board supports it
+                // This must be done before create_hash_threads() which may consume resources
+                if let Some(bitaxe_board) = board.as_any().downcast_ref::<crate::board::bitaxe::BitaxeBoard>() {
+                    if let Some(regulator) = bitaxe_board.get_voltage_regulator() {
+                        debug!(
+                            board = %board_info.model,
+                            serial = %board_id,
+                            "Registering voltage controller with API"
+                        );
+                        self.api_state
+                            .register_voltage_controller(board_id.clone(), regulator)
+                            .await;
+                    }
+                }
 
                 // Create hash threads from the board
                 match board.create_hash_threads().await {
@@ -173,6 +273,16 @@ impl Backplane {
                             error = %e,
                             "Hash board failed to start."
                         );
+
+                        // Register the failed board and unregister the partially initialized one
+                        self.api_state.unregister_board(&board_id).await;
+                        self.api_state
+                            .register_failed_board(FailedBoardStatus {
+                                model: Some(board_info.model.clone()),
+                                serial_number: Some(board_id.clone()),
+                                error: format!("Failed to create hash threads: {}", e),
+                            })
+                            .await;
                     }
                 }
             }
@@ -204,6 +314,11 @@ impl Backplane {
                                 );
                             }
                         }
+
+                        // Unregister voltage controller and board info from API
+                        self.api_state.unregister_voltage_controller(&board_id).await;
+                        self.api_state.unregister_board(&board_id).await;
+
                         // Don't re-insert - board is removed
                         break; // For now, assume one board per device
                     }
@@ -240,12 +355,27 @@ impl Backplane {
                             error = %e,
                             "Failed to create CPU miner board"
                         );
+
+                        // Register the failed board
+                        self.api_state
+                            .register_failed_board(FailedBoardStatus {
+                                model: Some(descriptor.name.to_string()),
+                                serial_number: Some(device_info.device_id.clone()),
+                                error: format!("Failed to create CPU miner: {}", e),
+                            })
+                            .await;
+
                         return Ok(());
                     }
                 };
 
                 let board_info = board.board_info();
                 let board_id = device_info.device_id.clone();
+
+                // Register board information with API
+                self.api_state
+                    .register_board(board_id.clone(), board_info.clone())
+                    .await;
 
                 // Create hash threads from the board
                 match board.create_hash_threads().await {
@@ -279,6 +409,16 @@ impl Backplane {
                             error = %e,
                             "CPU miner failed to start."
                         );
+
+                        // Register the failed board and unregister the partially initialized one
+                        self.api_state.unregister_board(&board_id).await;
+                        self.api_state
+                            .register_failed_board(FailedBoardStatus {
+                                model: Some(board_info.model.clone()),
+                                serial_number: Some(board_id.clone()),
+                                error: format!("Failed to create hash threads: {}", e),
+                            })
+                            .await;
                     }
                 }
             }
@@ -300,6 +440,9 @@ impl Backplane {
                             );
                         }
                     }
+
+                    // Unregister board info from API
+                    self.api_state.unregister_board(&device_id).await;
                 }
             }
         }

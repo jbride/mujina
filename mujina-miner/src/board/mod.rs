@@ -14,7 +14,7 @@ use crate::{asic::hash_thread::HashThread, transport::UsbDeviceInfo};
 /// creates hash threads that handle chip communication. The backplane creates
 /// boards via factory functions and manages their lifecycle through this trait.
 #[async_trait]
-pub trait Board: Send {
+pub trait Board: Send + AsAny {
     /// Board identification and metadata.
     fn board_info(&self) -> BoardInfo;
 
@@ -33,6 +33,11 @@ pub trait Board: Send {
     /// Board-to-thread shutdown is implementation-specific (not exposed through
     /// HashThread trait). Call board.shutdown() to trigger thread shutdown.
     async fn create_hash_threads(&mut self) -> Result<Vec<Box<dyn HashThread>>, BoardError>;
+}
+
+/// Helper trait to enable downcasting of Board trait objects.
+pub trait AsAny {
+    fn as_any(&self) -> &dyn std::any::Any;
 }
 
 /// Information about a board

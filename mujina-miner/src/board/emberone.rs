@@ -25,6 +25,12 @@ impl EmberOne {
     }
 }
 
+impl crate::board::AsAny for EmberOne {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
 #[async_trait]
 impl Board for EmberOne {
     fn board_info(&self) -> BoardInfo {
