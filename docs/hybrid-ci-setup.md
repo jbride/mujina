@@ -37,7 +37,11 @@ Modify the list of branches to support your development efforts as necessary.
 
 ### 2.1. Skipping Clippy Tests
 
-You can skip clippy lints when manually triggering the workflow via the GitHub UI. Check the "Skip clippy lints" option when running the workflow manually. By default, clippy is enabled.
+You can skip clippy lints when manually triggering the workflow via the GitHub UI.
+(Manual triggering is available only on the `main` branch.
+Check the "Skip clippy lints" option when running the workflow manually. By default, clippy is enabled.
+
+![Clippy Skip](images/clippy_skip.png)
 
 ## 3. Local testing
 

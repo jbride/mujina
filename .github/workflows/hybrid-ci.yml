@@ -7,16 +7,16 @@ on:
     branches: [ main, master, preview, gh_actions ]
   workflow_dispatch:
     inputs:
-      run_arm64:
-        description: "Run ARM64 native test"
-        type: boolean
-        default: true
       run_container_ci:
         description: "Run container CI"
         type: boolean
         default: true
       skip_clippy:
         description: "Skip clippy lints"
+        type: boolean
+        default: false
+      run_arm64:
+        description: "Run ARM64 native test"
         type: boolean
         default: false
 
