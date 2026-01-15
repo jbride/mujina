@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, error, warn};
+use utoipa::{OpenApi, ToSchema};
 
 use crate::{
     board::BoardInfo,
@@ -23,35 +24,44 @@ use crate::{
 pub type VoltageControllerHandle = Arc<Mutex<Tps546<BitaxeRawI2c>>>;
 
 /// Board status for a board that failed initialization.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct FailedBoardStatus {
     /// Board model/type if known
+    #[schema(example = "Bitaxe Gamma")]
     pub model: Option<String>,
     /// Serial number if available
+    #[schema(example = "ABC12345")]
     pub serial_number: Option<String>,
     /// Error message describing why initialization failed
+    #[schema(example = "Failed to initialize I2C communication")]
     pub error: String,
 }
 
 /// Board status information for API responses.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct BoardStatus {
     /// Board model/type (e.g., "Bitaxe Gamma")
+    #[schema(example = "Bitaxe Gamma")]
     pub model: String,
     /// Board firmware version if available
+    #[schema(example = "2.1.4")]
     pub firmware_version: Option<String>,
     /// Serial number
+    #[schema(example = "ABC12345")]
     pub serial_number: String,
     /// Whether the board is currently connected
+    #[schema(example = true)]
     pub connected: bool,
     /// Whether voltage control is available for this board
+    #[schema(example = true)]
     pub voltage_control_available: bool,
     /// Current voltage in volts (if voltage control is available)
+    #[schema(example = 1.2)]
     pub current_voltage_v: Option<f32>,
 }
 
 /// Complete board list response including both active and failed boards.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct BoardListResponse {
     /// Successfully initialized and active boards
     pub active_boards: Vec<BoardStatus>,
@@ -186,49 +196,66 @@ impl AppState {
 }
 
 /// Echo request payload.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
 pub struct EchoRequest {
     /// The message to echo back.
+    #[schema(example = "Hello, Mujina!")]
     pub message: String,
 }
 
 /// Echo response payload.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
 pub struct EchoResponse {
     /// The echoed message.
+    #[schema(example = "Hello, Mujina!")]
     pub message: String,
 }
 
 /// Set voltage request payload.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
 pub struct SetVoltageRequest {
     /// Target voltage in volts (e.g., 1.2 for 1.2V)
+    #[schema(example = 1.2, minimum = 0.5, maximum = 2.0)]
     pub voltage: f32,
 }
 
 /// Set voltage response payload.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
 pub struct SetVoltageResponse {
     /// Whether the operation was successful
+    #[schema(example = true)]
     pub success: bool,
     /// The requested voltage in volts
+    #[schema(example = 1.2)]
     pub requested_voltage: f32,
     /// The actual voltage readback in volts (if successful)
+    #[schema(example = 1.198)]
     pub actual_voltage: Option<f32>,
     /// Error message (if any)
+    #[schema(example = "Voltage set to 1.200V (readback: 1.198V)")]
     pub message: Option<String>,
 }
 
 /// API error response.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
 pub struct ErrorResponse {
     /// Error message
+    #[schema(example = "Board with serial 'XYZ789' not found")]
     pub error: String,
 }
 
 /// Echo endpoint handler.
 ///
 /// Echoes back the provided message. Useful for testing API connectivity.
+#[utoipa::path(
+    post,
+    path = "/api/v1/echo",
+    request_body = EchoRequest,
+    responses(
+        (status = 200, description = "Successfully echoed the message", body = EchoResponse)
+    ),
+    tag = "Testing"
+)]
 async fn echo(Json(req): Json<EchoRequest>) -> Json<EchoResponse> {
     Json(EchoResponse {
         message: req.message,
@@ -238,6 +265,14 @@ async fn echo(Json(req): Json<EchoRequest>) -> Json<EchoResponse> {
 /// Health check endpoint handler.
 ///
 /// Returns a simple OK status to verify the API is running.
+#[utoipa::path(
+    get,
+    path = "/api/v1/health",
+    responses(
+        (status = 200, description = "API is healthy", body = String, example = "OK")
+    ),
+    tag = "Health"
+)]
 async fn health() -> &'static str {
     "OK"
 }
@@ -255,6 +290,14 @@ async fn health() -> &'static str {
 /// ```bash
 /// curl http://localhost:7785/api/v1/boards
 /// ```
+#[utoipa::path(
+    get,
+    path = "/api/v1/boards",
+    responses(
+        (status = 200, description = "List of all boards", body = BoardListResponse)
+    ),
+    tag = "Boards"
+)]
 async fn list_boards(State(state): State<AppState>) -> Json<BoardListResponse> {
     let boards = state.get_board_list().await;
     Json(boards)
@@ -273,6 +316,21 @@ async fn list_boards(State(state): State<AppState>) -> Json<BoardListResponse> {
        -H "Content-Type: application/json" \
        -d '{"voltage": 1.2}'
 */
+#[utoipa::path(
+    post,
+    path = "/api/v1/board/{serial}/voltage",
+    request_body = SetVoltageRequest,
+    params(
+        ("serial" = String, Path, description = "Board serial number", example = "ABC12345")
+    ),
+    responses(
+        (status = 200, description = "Voltage successfully set", body = SetVoltageResponse),
+        (status = 400, description = "Invalid voltage value", body = ErrorResponse),
+        (status = 404, description = "Board not found or voltage control not available", body = ErrorResponse),
+        (status = 500, description = "Failed to set voltage", body = SetVoltageResponse)
+    ),
+    tag = "Boards"
+)]
 async fn set_board_voltage(
     State(state): State<AppState>,
     Path(serial): Path<String>,
@@ -383,6 +441,47 @@ async fn set_board_voltage(
         }
     }
 }
+
+/// OpenAPI documentation for API v1.
+#[derive(OpenApi)]
+#[openapi(
+    paths(
+        echo,
+        health,
+        list_boards,
+        set_board_voltage,
+    ),
+    components(
+        schemas(
+            EchoRequest,
+            EchoResponse,
+            BoardStatus,
+            FailedBoardStatus,
+            BoardListResponse,
+            SetVoltageRequest,
+            SetVoltageResponse,
+            ErrorResponse,
+        )
+    ),
+    tags(
+        (name = "Health", description = "Health check endpoints"),
+        (name = "Testing", description = "Testing and debugging endpoints"),
+        (name = "Boards", description = "Board management and control endpoints")
+    ),
+    servers(
+        (url = "/", description = "Current server")
+    ),
+    info(
+        title = "Mujina Miner API",
+        version = "1.0.0",
+        description = "REST API for controlling and monitoring Mujina Bitcoin mining hardware",
+        license(
+            name = "GPL-3.0-or-later",
+            url = "https://www.gnu.org/licenses/gpl-3.0.html"
+        )
+    )
+)]
+pub struct ApiDoc;
 
 /// Build the v1 API routes.
 pub fn routes(state: AppState) -> Router {

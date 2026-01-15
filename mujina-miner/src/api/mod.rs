@@ -18,6 +18,8 @@ use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
 use tracing::{info, warn, Level};
+use utoipa::OpenApi;
+use utoipa_swagger_ui::SwaggerUi;
 
 /// API server configuration.
 #[derive(Debug, Clone)]
@@ -47,6 +49,7 @@ pub async fn serve(config: ApiConfig, state: AppState, shutdown: CancellationTok
     let actual_addr = listener.local_addr()?;
 
     info!(url = %format!("http://{}", actual_addr), "API server listening.");
+    info!(swagger_ui = %format!("http://{}/swagger-ui", actual_addr), "Swagger UI available.");
 
     // Warn if binding to non-localhost addresses
     if !actual_addr.ip().is_loopback() {
@@ -69,9 +72,12 @@ pub async fn serve(config: ApiConfig, state: AppState, shutdown: CancellationTok
 
 /// Build the application router with all API routes.
 fn build_router(state: AppState) -> Router {
-    Router::new().nest("/api/v1", v1::routes(state)).layer(
-        TraceLayer::new_for_http()
-            .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
-            .on_response(DefaultOnResponse::new().level(Level::INFO)),
-    )
+    Router::new()
+        .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", v1::ApiDoc::openapi()))
+        .nest("/api/v1", v1::routes(state))
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
+                .on_response(DefaultOnResponse::new().level(Level::INFO)),
+        )
 }

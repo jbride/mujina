@@ -72,6 +72,13 @@ Planned support:
 - [Bitaxe Gamma Board Guide](mujina-miner/src/board/bitaxe_gamma.md) - Hardware
   and software interface documentation for Bitaxe Gamma
 
+### REST API Documentation
+
+Swagger / OPEN-API documentation of the REST endpoints exposed by Mujina is available at start-up.
+
+- Swagger UI: http://127.0.0.1:7785/swagger-ui
+- OpenAPI JSON: http://127.0.0.1:7785/api-docs/openapi.json
+
 ## Build Requirements
 
 ### Linux
