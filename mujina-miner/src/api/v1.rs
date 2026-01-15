@@ -58,6 +58,9 @@ pub struct BoardStatus {
     /// Current voltage in volts (if voltage control is available)
     #[schema(example = 1.2)]
     pub current_voltage_v: Option<f32>,
+    /// Error message if the board is experiencing issues (e.g., I2C communication failure)
+    #[schema(example = "I2C communication timeout")]
+    pub error: Option<String>,
 }
 
 /// Complete board list response including both active and failed boards.
@@ -149,11 +152,20 @@ impl AppState {
         for (serial, info) in boards.iter() {
             let has_controller = controllers.contains_key(serial);
 
-            // Read current voltage if controller is available
+            // Read current voltage if controller is available and track any errors
+            let mut board_error: Option<String> = None;
             let current_voltage = if has_controller {
                 if let Some(controller) = controllers.get(serial) {
-                    match controller.lock().await.get_vout().await {
-                        Ok(mv) => {
+                    // Use timeout to prevent blocking on hung I2C operations
+                    let voltage_future = async {
+                        controller.lock().await.get_vout().await
+                    };
+
+                    match tokio::time::timeout(
+                        tokio::time::Duration::from_millis(500),
+                        voltage_future
+                    ).await {
+                        Ok(Ok(mv)) => {
                             let volts = mv as f32 / 1000.0;
                             debug!(
                                 serial = %serial,
@@ -162,12 +174,23 @@ impl AppState {
                             );
                             Some(volts)
                         }
-                        Err(e) => {
+                        Ok(Err(e)) => {
+                            let err_msg = format!("I2C error reading voltage: {}", e);
                             warn!(
                                 serial = %serial,
                                 error = %e,
                                 "Failed to read voltage for board"
                             );
+                            board_error = Some(err_msg);
+                            None
+                        }
+                        Err(_) => {
+                            let err_msg = "I2C timeout reading voltage (communication hung)".to_string();
+                            warn!(
+                                serial = %serial,
+                                "Timeout reading voltage for board (I2C may be hung)"
+                            );
+                            board_error = Some(err_msg);
                             None
                         }
                     }
@@ -185,6 +208,7 @@ impl AppState {
                 connected: true,
                 voltage_control_available: has_controller,
                 current_voltage_v: current_voltage,
+                error: board_error,
             });
         }
 
@@ -283,8 +307,9 @@ async fn health() -> &'static str {
 /// Includes both successfully initialized boards and boards that failed to initialize.
 ///
 /// # Response Structure
-/// - `active_boards`: Successfully connected boards with full status
-/// - `failed_boards`: Boards that failed initialization with error details
+/// - `active_boards`: Successfully initialized boards. May include an `error` field if
+///   the board is experiencing runtime issues (e.g., I2C communication failures)
+/// - `failed_boards`: Boards that failed initial initialization with error details
 ///
 /// # Example
 /// ```bash

@@ -749,49 +749,102 @@ impl BitaxeBoard {
                 };
 
                 // Read power stats using the shared regulator
-                let vin = match regulator.lock().await.get_vin().await {
-                    Ok(mv) => format!("{:.2}V", mv as f32 / 1000.0),
-                    Err(_) => "N/A".to_string(),
+                // Use timeouts to prevent I2C hangs from blocking the API
+                const I2C_TIMEOUT: Duration = Duration::from_millis(500);
+
+                let vin = match tokio::time::timeout(
+                    I2C_TIMEOUT,
+                    async { regulator.lock().await.get_vin().await }
+                ).await {
+                    Ok(Ok(mv)) => format!("{:.2}V", mv as f32 / 1000.0),
+                    Ok(Err(_)) => "N/A".to_string(),
+                    Err(_) => {
+                        warn!("Timeout reading VIN (I2C may be hung)");
+                        "N/A".to_string()
+                    }
                 };
 
-                let vout = match regulator.lock().await.get_vout().await {
-                    Ok(mv) => {
+                let vout = match tokio::time::timeout(
+                    I2C_TIMEOUT,
+                    async { regulator.lock().await.get_vout().await }
+                ).await {
+                    Ok(Ok(mv)) => {
                         let volts = mv as f32 / 1000.0;
                         if volts < 1.0 {
                             warn!("Core voltage low: {:.3}V", volts);
                         }
                         format!("{:.3}V", volts)
                     }
-                    Err(_) => "N/A".to_string(),
+                    Ok(Err(_)) => "N/A".to_string(),
+                    Err(_) => {
+                        warn!("Timeout reading VOUT (I2C may be hung)");
+                        "N/A".to_string()
+                    }
                 };
 
-                let iout = match regulator.lock().await.get_iout().await {
-                    Ok(ma) => format!("{:.2}A", ma as f32 / 1000.0),
-                    Err(_) => "N/A".to_string(),
+                let iout = match tokio::time::timeout(
+                    I2C_TIMEOUT,
+                    async { regulator.lock().await.get_iout().await }
+                ).await {
+                    Ok(Ok(ma)) => format!("{:.2}A", ma as f32 / 1000.0),
+                    Ok(Err(_)) => "N/A".to_string(),
+                    Err(_) => {
+                        warn!("Timeout reading IOUT (I2C may be hung)");
+                        "N/A".to_string()
+                    }
                 };
 
-                let power_w = match regulator.lock().await.get_power().await {
-                    Ok(mw) => format!("{:.1}W", mw as f32 / 1000.0),
-                    Err(_) => "N/A".to_string(),
+                let power_w = match tokio::time::timeout(
+                    I2C_TIMEOUT,
+                    async { regulator.lock().await.get_power().await }
+                ).await {
+                    Ok(Ok(mw)) => format!("{:.1}W", mw as f32 / 1000.0),
+                    Ok(Err(_)) => "N/A".to_string(),
+                    Err(_) => {
+                        warn!("Timeout reading power (I2C may be hung)");
+                        "N/A".to_string()
+                    }
                 };
 
-                let vr_temp = match regulator.lock().await.get_temperature().await {
-                    Ok(t) => format!("{} degC", t),
-                    Err(_) => "N/A".to_string(),
+                let vr_temp = match tokio::time::timeout(
+                    I2C_TIMEOUT,
+                    async { regulator.lock().await.get_temperature().await }
+                ).await {
+                    Ok(Ok(t)) => format!("{} degC", t),
+                    Ok(Err(_)) => "N/A".to_string(),
+                    Err(_) => {
+                        warn!("Timeout reading VR temperature (I2C may be hung)");
+                        "N/A".to_string()
+                    }
                 };
 
                 // Check power status - critical faults will return error
-                if let Err(e) = regulator.lock().await.check_status().await {
-                    error!("CRITICAL: Power controller fault detected: {}", e);
+                match tokio::time::timeout(
+                    I2C_TIMEOUT,
+                    async { regulator.lock().await.check_status().await }
+                ).await {
+                    Ok(Err(e)) => {
+                        error!("CRITICAL: Power controller fault detected: {}", e);
 
-                    // Try to clear the fault once
-                    warn!("Attempting to clear power controller faults...");
-                    if let Err(clear_err) = regulator.lock().await.clear_faults().await {
-                        error!("Failed to clear faults: {}", clear_err);
+                        // Try to clear the fault once
+                        warn!("Attempting to clear power controller faults...");
+                        match tokio::time::timeout(
+                            I2C_TIMEOUT,
+                            async { regulator.lock().await.clear_faults().await }
+                        ).await {
+                            Ok(Err(clear_err)) => error!("Failed to clear faults: {}", clear_err),
+                            Err(_) => error!("Timeout clearing faults (I2C may be hung)"),
+                            Ok(Ok(())) => {}
+                        }
+
+                        // Continue monitoring
+                        continue;
                     }
-
-                    // Continue monitoring
-                    continue;
+                    Err(_) => {
+                        error!("Timeout checking power status (I2C may be hung)");
+                        continue;
+                    }
+                    Ok(Ok(())) => {}
                 }
 
                 info!(
