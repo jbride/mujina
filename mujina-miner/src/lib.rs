@@ -2,6 +2,7 @@ pub mod api;
 pub mod api_client;
 pub mod asic;
 pub mod backplane;
+pub mod backplane_cmd;
 pub mod board;
 pub mod config;
 pub mod cpu_miner;

@@ -50,6 +50,7 @@ impl Daemon {
         let (transport_tx, transport_rx) = mpsc::channel::<TransportEvent>(100);
         let (thread_tx, thread_rx) = mpsc::channel::<Box<dyn HashThread>>(10);
         let (source_reg_tx, source_reg_rx) = mpsc::channel::<SourceRegistration>(10);
+        let (backplane_cmd_tx, backplane_cmd_rx) = mpsc::channel(10);
 
         // Create and start USB transport discovery
         if std::env::var("MUJINA_USB_DISABLE").is_err() {
@@ -80,8 +81,12 @@ impl Daemon {
             }
         }
 
+        // Register backplane command channel with API state
+        let mut api_state_with_cmd = api_state.clone();
+        api_state_with_cmd.backplane_cmd_tx = Some(backplane_cmd_tx.clone());
+
         // Create and start backplane
-        let mut backplane = Backplane::new(transport_rx, thread_tx, api_state.clone());
+        let mut backplane = Backplane::new(transport_rx, backplane_cmd_rx, thread_tx, api_state_with_cmd.clone());
         self.tracker.spawn({
             let shutdown = self.shutdown.clone();
             async move {
@@ -231,7 +236,7 @@ impl Daemon {
         // Start the API server
         self.tracker.spawn({
             let shutdown = self.shutdown.clone();
-            let state = api_state.clone();
+            let state = api_state_with_cmd.clone();
             async move {
                 let config = ApiConfig::default();
                 if let Err(e) = api::serve(config, state, shutdown).await {

@@ -36,6 +36,21 @@ pub struct UsbDeviceInfo {
     // Future: other interfaces like HID, mass storage, etc.
 }
 
+impl Clone for UsbDeviceInfo {
+    fn clone(&self) -> Self {
+        Self {
+            vid: self.vid,
+            pid: self.pid,
+            serial_number: self.serial_number.clone(),
+            manufacturer: self.manufacturer.clone(),
+            product: self.product.clone(),
+            device_path: self.device_path.clone(),
+            // Don't clone the cached serial ports - let it be lazily populated again
+            serial_ports: OnceLock::new(),
+        }
+    }
+}
+
 impl UsbDeviceInfo {
     /// Get serial ports associated with this USB device.
     ///

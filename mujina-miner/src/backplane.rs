@@ -8,6 +8,7 @@
 use crate::{
     api::{AppState, FailedBoardStatus},
     asic::hash_thread::HashThread,
+    backplane_cmd::{BackplaneCommand, ReinitializeResult},
     board::{Board, BoardDescriptor, VirtualBoardRegistry},
     error::Result,
     tracing::prelude::*,
@@ -56,7 +57,11 @@ pub struct Backplane {
     virtual_registry: VirtualBoardRegistry,
     /// Active boards managed by the backplane
     boards: HashMap<String, Box<dyn Board + Send>>,
+    /// Device info for each board (for reinitialization)
+    board_devices: HashMap<String, UsbDeviceInfo>,
     event_rx: mpsc::Receiver<TransportEvent>,
+    /// Command channel for external control (API, MQTT, etc.)
+    cmd_rx: mpsc::Receiver<BackplaneCommand>,
     /// Channel to send hash threads to the scheduler
     scheduler_tx: mpsc::Sender<Box<dyn HashThread>>,
     /// Shared API state for registering board controllers
@@ -67,6 +72,7 @@ impl Backplane {
     /// Create a new backplane.
     pub fn new(
         event_rx: mpsc::Receiver<TransportEvent>,
+        cmd_rx: mpsc::Receiver<BackplaneCommand>,
         scheduler_tx: mpsc::Sender<Box<dyn HashThread>>,
         api_state: AppState,
     ) -> Self {
@@ -74,7 +80,9 @@ impl Backplane {
             registry: BoardRegistry,
             virtual_registry: VirtualBoardRegistry,
             boards: HashMap::new(),
+            board_devices: HashMap::new(),
             event_rx,
+            cmd_rx,
             scheduler_tx,
             api_state,
         }
@@ -82,14 +90,22 @@ impl Backplane {
 
     /// Run the backplane event loop.
     pub async fn run(&mut self) -> Result<()> {
-        while let Some(event) = self.event_rx.recv().await {
-            match event {
-                TransportEvent::Usb(usb_event) => {
-                    self.handle_usb_event(usb_event).await?;
+        loop {
+            tokio::select! {
+                Some(event) = self.event_rx.recv() => {
+                    match event {
+                        TransportEvent::Usb(usb_event) => {
+                            self.handle_usb_event(usb_event).await?;
+                        }
+                        TransportEvent::Cpu(cpu_event) => {
+                            self.handle_cpu_event(cpu_event).await?;
+                        }
+                    }
                 }
-                TransportEvent::Cpu(cpu_event) => {
-                    self.handle_cpu_event(cpu_event).await?;
+                Some(cmd) = self.cmd_rx.recv() => {
+                    self.handle_command(cmd).await;
                 }
+                else => break,
             }
         }
 
@@ -122,6 +138,129 @@ impl Backplane {
         }
     }
 
+    /// Handle commands from external interfaces (API, MQTT, etc.).
+    async fn handle_command(&mut self, cmd: BackplaneCommand) {
+        match cmd {
+            BackplaneCommand::ReinitializeBoard { serial, response_tx } => {
+                let result = self.reinitialize_board(&serial).await;
+                // Send response back (ignore if receiver dropped)
+                let _ = response_tx.send(result);
+            }
+        }
+    }
+
+    /// Reinitialize a specific board by serial number.
+    async fn reinitialize_board(&mut self, serial: &str) -> ReinitializeResult {
+        // Check if board exists
+        if !self.boards.contains_key(serial) {
+            return ReinitializeResult::failure(
+                "Board not found".to_string(),
+                format!("No board with serial '{}' is currently active", serial),
+            );
+        }
+
+        // Get the device info before removing the board
+        let device_info = match self.board_devices.get(serial) {
+            Some(info) => info.clone(),
+            None => {
+                return ReinitializeResult::failure(
+                    "Device info not found".to_string(),
+                    format!("No device info stored for board '{}'", serial),
+                );
+            }
+        };
+
+        // Remove the board
+        if let Some(mut board) = self.boards.remove(serial) {
+            let board_info = board.board_info();
+            let model = board_info.model.clone();
+
+            info!(
+                serial = %serial,
+                model = %model,
+                "Beginning board reinitialization"
+            );
+
+            // Shutdown the existing board
+            match board.shutdown().await {
+                Ok(()) => {
+                    info!(serial = %serial, model = %model, "Board shutdown complete");
+                }
+                Err(e) => {
+                    warn!(
+                        serial = %serial,
+                        model = %model,
+                        error = %e,
+                        "Error during board shutdown (continuing with reinitialization)"
+                    );
+                }
+            }
+
+            // Unregister from API
+            self.api_state.unregister_voltage_controller(serial).await;
+            self.api_state.unregister_board(serial).await;
+
+            // Remove from device tracking
+            self.board_devices.remove(serial);
+
+            // Drop the board to release serial ports before reprobing
+            drop(board);
+
+            info!(
+                serial = %serial,
+                model = %model,
+                "Board shutdown complete, reprobing device"
+            );
+
+            // Re-probe the device to reinitialize it
+            match self.handle_usb_event(UsbTransportEvent::UsbDeviceConnected(device_info)).await {
+                Ok(()) => {
+                    info!(
+                        serial = %serial,
+                        model = %model,
+                        "Board successfully reinitialized"
+                    );
+
+                    // Try to read the new voltage
+                    let new_voltage = if let Some(controller) = self.api_state.voltage_controllers.read().await.get(serial) {
+                        match tokio::time::timeout(
+                            Duration::from_millis(500),
+                            async { controller.lock().await.get_vout().await }
+                        ).await {
+                            Ok(Ok(mv)) => Some(mv as f32 / 1000.0),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
+
+                    ReinitializeResult::success(
+                        format!("Board '{}' ({}) successfully reinitialized", serial, model),
+                        new_voltage,
+                    )
+                }
+                Err(e) => {
+                    warn!(
+                        serial = %serial,
+                        model = %model,
+                        error = %e,
+                        "Failed to reprobe device after shutdown"
+                    );
+
+                    ReinitializeResult::failure(
+                        format!("Board shutdown succeeded but reprobe failed"),
+                        format!("Reprobe error: {}", e),
+                    )
+                }
+            }
+        } else {
+            ReinitializeResult::failure(
+                "Failed to remove board".to_string(),
+                format!("Board '{}' disappeared during reinitialization", serial),
+            )
+        }
+    }
+
     /// Handle USB transport events.
     async fn handle_usb_event(&mut self, event: UsbTransportEvent) -> Result<()> {
         match event {
@@ -143,9 +282,10 @@ impl Backplane {
                     "Hash board connected via USB."
                 );
 
-                // Capture info needed for error reporting before moving device_info
+                // Capture info needed for error reporting and reinitialization
                 let board_name = descriptor.name;
                 let serial_for_error = device_info.serial_number.clone();
+                let device_info_clone = device_info.clone(); // Save for reinitialization
 
                 // Create the board using the descriptor's factory function with timeout
                 let timeout = get_board_init_timeout();
@@ -253,6 +393,8 @@ impl Backplane {
                     Ok(threads) => {
                         // Store board for lifecycle management
                         self.boards.insert(board_id.clone(), board);
+                        // Store device info for reinitialization
+                        self.board_devices.insert(board_id.clone(), device_info_clone);
 
                         // Send threads to scheduler individually
                         for thread in threads {

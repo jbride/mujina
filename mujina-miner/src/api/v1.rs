@@ -8,12 +8,13 @@ use axum::{
     Router,
 };
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, sync::Arc};
-use tokio::sync::{Mutex, RwLock};
+use std::{collections::HashMap, sync::Arc, time::{Duration, Instant}};
+use tokio::sync::{mpsc, Mutex, RwLock};
 use tracing::{debug, error, warn};
 use utoipa::{OpenApi, ToSchema};
 
 use crate::{
+    backplane_cmd::BackplaneCommand,
     board::BoardInfo,
     hw_trait::I2c,
     mgmt_protocol::bitaxe_raw::i2c::BitaxeRawI2c,
@@ -22,6 +23,68 @@ use crate::{
 
 /// Voltage controller handle for a board.
 pub type VoltageControllerHandle = Arc<Mutex<Tps546<BitaxeRawI2c>>>;
+
+/// Board health state tracking for auto-recovery.
+#[derive(Debug, Clone)]
+pub struct BoardHealthState {
+    /// Number of consecutive failures
+    pub consecutive_failures: u32,
+    /// Timestamp of last failure
+    pub last_failure_time: Option<Instant>,
+    /// Number of automatic retry attempts
+    pub retry_count: u32,
+    /// Timestamp of last retry attempt
+    pub last_retry_time: Option<Instant>,
+}
+
+impl Default for BoardHealthState {
+    fn default() -> Self {
+        Self {
+            consecutive_failures: 0,
+            last_failure_time: None,
+            retry_count: 0,
+            last_retry_time: None,
+        }
+    }
+}
+
+/// Board recovery configuration from environment variables.
+#[derive(Debug, Clone)]
+pub struct BoardRecoveryConfig {
+    /// Number of consecutive failures before marking board as needing recovery
+    pub failure_threshold: u32,
+    /// Maximum number of automatic retry attempts
+    pub max_auto_retries: u32,
+    /// Duration between automatic retry attempts
+    pub retry_interval: Duration,
+    /// Whether automatic recovery is enabled
+    pub auto_recovery_enabled: bool,
+}
+
+impl Default for BoardRecoveryConfig {
+    fn default() -> Self {
+        Self {
+            failure_threshold: std::env::var("MUJINA_BOARD_FAILURE_THRESHOLD")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(3),
+            max_auto_retries: std::env::var("MUJINA_BOARD_MAX_AUTO_RETRIES")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(3),
+            retry_interval: Duration::from_secs(
+                std::env::var("MUJINA_BOARD_RETRY_INTERVAL")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(30)
+            ),
+            auto_recovery_enabled: std::env::var("MUJINA_BOARD_AUTO_RECOVERY")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(false),
+        }
+    }
+}
 
 /// Board status for a board that failed initialization.
 #[derive(Debug, Clone, Serialize, ToSchema)]
@@ -61,6 +124,15 @@ pub struct BoardStatus {
     /// Error message if the board is experiencing issues (e.g., I2C communication failure)
     #[schema(example = "I2C communication timeout")]
     pub error: Option<String>,
+    /// Whether the board needs reinitialization due to consecutive failures
+    #[schema(example = false)]
+    pub needs_reinit: bool,
+    /// Number of consecutive failures
+    #[schema(example = 0)]
+    pub consecutive_failures: u32,
+    /// Number of automatic retry attempts
+    #[schema(example = 0)]
+    pub retry_count: u32,
 }
 
 /// Complete board list response including both active and failed boards.
@@ -73,7 +145,7 @@ pub struct BoardListResponse {
 }
 
 /// Shared application state for API endpoints.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct AppState {
     /// Registry of voltage controllers by board serial number
     pub voltage_controllers: Arc<RwLock<HashMap<String, VoltageControllerHandle>>>,
@@ -81,6 +153,25 @@ pub struct AppState {
     pub boards: Arc<RwLock<HashMap<String, BoardInfo>>>,
     /// Registry of failed board initialization attempts
     pub failed_boards: Arc<RwLock<Vec<FailedBoardStatus>>>,
+    /// Board health state tracking for auto-recovery
+    pub board_health: Arc<RwLock<HashMap<String, BoardHealthState>>>,
+    /// Recovery configuration
+    pub recovery_config: BoardRecoveryConfig,
+    /// Command channel to backplane for board operations (optional for testing)
+    pub backplane_cmd_tx: Option<mpsc::Sender<BackplaneCommand>>,
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        Self {
+            voltage_controllers: Arc::new(RwLock::new(HashMap::new())),
+            boards: Arc::new(RwLock::new(HashMap::new())),
+            failed_boards: Arc::new(RwLock::new(Vec::new())),
+            board_health: Arc::new(RwLock::new(HashMap::new())),
+            recovery_config: BoardRecoveryConfig::default(),
+            backplane_cmd_tx: None,
+        }
+    }
 }
 
 impl AppState {
@@ -139,6 +230,7 @@ impl AppState {
         let boards = self.boards.read().await;
         let controllers = self.voltage_controllers.read().await;
         let failed = self.failed_boards.read().await;
+        let mut board_health = self.board_health.write().await;
 
         debug!(
             board_count = boards.len(),
@@ -172,6 +264,19 @@ impl AppState {
                                 voltage = volts,
                                 "Read current voltage for board"
                             );
+
+                            // Reset failure counter on success
+                            let health = board_health.entry(serial.clone()).or_default();
+                            if health.consecutive_failures > 0 {
+                                debug!(
+                                    serial = %serial,
+                                    previous_failures = health.consecutive_failures,
+                                    "Board recovered, resetting failure counter"
+                                );
+                                health.consecutive_failures = 0;
+                                health.last_failure_time = None;
+                            }
+
                             Some(volts)
                         }
                         Ok(Err(e)) => {
@@ -182,6 +287,20 @@ impl AppState {
                                 "Failed to read voltage for board"
                             );
                             board_error = Some(err_msg);
+
+                            // Increment failure counter
+                            let health = board_health.entry(serial.clone()).or_default();
+                            health.consecutive_failures += 1;
+                            health.last_failure_time = Some(Instant::now());
+
+                            if health.consecutive_failures >= self.recovery_config.failure_threshold {
+                                warn!(
+                                    serial = %serial,
+                                    consecutive_failures = health.consecutive_failures,
+                                    "Board marked as needing recovery"
+                                );
+                            }
+
                             None
                         }
                         Err(_) => {
@@ -191,6 +310,20 @@ impl AppState {
                                 "Timeout reading voltage for board (I2C may be hung)"
                             );
                             board_error = Some(err_msg);
+
+                            // Increment failure counter
+                            let health = board_health.entry(serial.clone()).or_default();
+                            health.consecutive_failures += 1;
+                            health.last_failure_time = Some(Instant::now());
+
+                            if health.consecutive_failures >= self.recovery_config.failure_threshold {
+                                warn!(
+                                    serial = %serial,
+                                    consecutive_failures = health.consecutive_failures,
+                                    "Board marked as needing recovery"
+                                );
+                            }
+
                             None
                         }
                     }
@@ -201,6 +334,10 @@ impl AppState {
                 None
             };
 
+            // Get health state for this board
+            let health = board_health.entry(serial.clone()).or_default();
+            let needs_reinit = health.consecutive_failures >= self.recovery_config.failure_threshold;
+
             active_boards.push(BoardStatus {
                 model: info.model.clone(),
                 firmware_version: info.firmware_version.clone(),
@@ -209,6 +346,9 @@ impl AppState {
                 voltage_control_available: has_controller,
                 current_voltage_v: current_voltage,
                 error: board_error,
+                needs_reinit,
+                consecutive_failures: health.consecutive_failures,
+                retry_count: health.retry_count,
             });
         }
 
@@ -268,6 +408,23 @@ pub struct ErrorResponse {
     pub error: String,
 }
 
+/// Reinitialize board response payload.
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+pub struct ReinitializeResponse {
+    /// Whether the operation was successful
+    #[schema(example = true)]
+    pub success: bool,
+    /// Descriptive message
+    #[schema(example = "Board reinitialized successfully")]
+    pub message: String,
+    /// Previous error message if available
+    #[schema(example = "I2C error: WriteRead failed: Response ID mismatch")]
+    pub previous_error: Option<String>,
+    /// Current voltage after reinitialization if available
+    #[schema(example = 1.2)]
+    pub current_voltage: Option<f32>,
+}
+
 /// Echo endpoint handler.
 ///
 /// Echoes back the provided message. Useful for testing API connectivity.
@@ -313,7 +470,7 @@ async fn health() -> &'static str {
 ///
 /// # Example
 /// ```bash
-/// curl http://localhost:7785/api/v1/boards
+/// curl -s http://localhost:7785/api/v1/boards | jq -r '.'
 /// ```
 #[utoipa::path(
     get,
@@ -467,6 +624,171 @@ async fn set_board_voltage(
     }
 }
 
+/*   Reinitialize board endpoint handler.
+
+     Manually triggers reinitialization of a board that has experienced persistent failures.
+     This endpoint resets the failure counters and attempts to re-probe the board.
+
+    # Example
+
+    export BOARD_SERIAL_ID=ABC12345
+    curl -X POST http://localhost:7785/api/v1/board/$BOARD_SERIAL_ID/reinitialize
+*/
+#[utoipa::path(
+    post,
+    path = "/api/v1/board/{serial}/reinitialize",
+    params(
+        ("serial" = String, Path, description = "Board serial number", example = "ABC12345")
+    ),
+    responses(
+        (status = 200, description = "Board reinitialized successfully", body = ReinitializeResponse),
+        (status = 404, description = "Board not found", body = ErrorResponse),
+        (status = 501, description = "Reinitialization not yet implemented", body = ReinitializeResponse)
+    ),
+    tag = "Boards"
+)]
+async fn reinitialize_board(
+    State(state): State<AppState>,
+    Path(serial): Path<String>,
+) -> Response {
+    debug!(
+        serial = %serial,
+        "API request to reinitialize board"
+    );
+
+    // Check if board exists
+    let boards = state.boards.read().await;
+    if !boards.contains_key(&serial) {
+        let error = ErrorResponse {
+            error: format!("Board with serial '{}' not found", serial),
+        };
+        return (StatusCode::NOT_FOUND, Json(error)).into_response();
+    }
+    drop(boards);
+
+    // Get current health state to capture previous error
+    let mut board_health = state.board_health.write().await;
+    let health = board_health.entry(serial.clone()).or_default();
+    let previous_failures = health.consecutive_failures;
+
+    // Reset health state immediately
+    health.consecutive_failures = 0;
+    health.last_failure_time = None;
+    health.retry_count = 0;
+    health.last_retry_time = None;
+    drop(board_health);
+
+    warn!(
+        serial = %serial,
+        previous_failures = previous_failures,
+        "Manual board reinitialization requested"
+    );
+
+    // If backplane command channel is available, use it for full reinitialization
+    if let Some(cmd_tx) = &state.backplane_cmd_tx {
+        use crate::backplane_cmd::{BackplaneCommand, ReinitializeResult};
+        use tokio::sync::oneshot;
+
+        let (response_tx, response_rx) = oneshot::channel();
+
+        let cmd = BackplaneCommand::ReinitializeBoard {
+            serial: serial.clone(),
+            response_tx,
+        };
+
+        // Send command to backplane
+        if let Err(e) = cmd_tx.send(cmd).await {
+            error!(
+                serial = %serial,
+                error = %e,
+                "Failed to send reinitialize command to backplane"
+            );
+
+            let response = ReinitializeResponse {
+                success: false,
+                message: "Failed to communicate with backplane".to_string(),
+                previous_error: if previous_failures > 0 {
+                    Some(format!("{} consecutive failures before reset", previous_failures))
+                } else {
+                    None
+                },
+                current_voltage: None,
+            };
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(response)).into_response();
+        }
+
+        // Wait for response from backplane (with timeout)
+        match tokio::time::timeout(Duration::from_secs(10), response_rx).await {
+            Ok(Ok(result)) => {
+                warn!(
+                    serial = %serial,
+                    success = result.success,
+                    message = %result.message,
+                    "Board reinitialization completed"
+                );
+
+                let response = ReinitializeResponse {
+                    success: result.success,
+                    message: result.message,
+                    previous_error: if previous_failures > 0 {
+                        Some(format!("{} consecutive failures before reset", previous_failures))
+                    } else {
+                        result.error
+                    },
+                    current_voltage: result.current_voltage,
+                };
+
+                let status = if result.success {
+                    StatusCode::OK
+                } else {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                };
+
+                (status, Json(response)).into_response()
+            }
+            Ok(Err(_)) => {
+                error!(serial = %serial, "Backplane response channel closed");
+                let response = ReinitializeResponse {
+                    success: false,
+                    message: "Backplane did not respond".to_string(),
+                    previous_error: None,
+                    current_voltage: None,
+                };
+                (StatusCode::INTERNAL_SERVER_ERROR, Json(response)).into_response()
+            }
+            Err(_) => {
+                error!(serial = %serial, "Timeout waiting for backplane response");
+                let response = ReinitializeResponse {
+                    success: false,
+                    message: "Timeout waiting for backplane to reinitialize board".to_string(),
+                    previous_error: None,
+                    current_voltage: None,
+                };
+                (StatusCode::GATEWAY_TIMEOUT, Json(response)).into_response()
+            }
+        }
+    } else {
+        // Fallback: backplane command channel not available
+        warn!(
+            serial = %serial,
+            "Backplane command channel not available, only resetting failure counters"
+        );
+
+        let response = ReinitializeResponse {
+            success: true,
+            message: "Failure counters reset (backplane command channel not configured)".to_string(),
+            previous_error: if previous_failures > 0 {
+                Some(format!("{} consecutive failures before reset", previous_failures))
+            } else {
+                None
+            },
+            current_voltage: None,
+        };
+
+        (StatusCode::OK, Json(response)).into_response()
+    }
+}
+
 /// OpenAPI documentation for API v1.
 #[derive(OpenApi)]
 #[openapi(
@@ -475,6 +797,7 @@ async fn set_board_voltage(
         health,
         list_boards,
         set_board_voltage,
+        reinitialize_board,
     ),
     components(
         schemas(
@@ -486,6 +809,7 @@ async fn set_board_voltage(
             SetVoltageRequest,
             SetVoltageResponse,
             ErrorResponse,
+            ReinitializeResponse,
         )
     ),
     tags(
@@ -515,5 +839,6 @@ pub fn routes(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/boards", get(list_boards))
         .route("/board/:serial/voltage", post(set_board_voltage))
+        .route("/board/:serial/reinitialize", post(reinitialize_board))
         .with_state(state)
 }
