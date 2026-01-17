@@ -1,15 +1,39 @@
-# Bitaxe Gamma Board Support
+**Bitaxe Gamma Board Support**
 
 This document describes mujina-miner's support for the Bitaxe Gamma board.
 
-## Overview
+- [1. Overview](#1-overview)
+- [2. Firmware Requirements](#2-firmware-requirements)
+- [3. Board Architecture](#3-board-architecture)
+- [4. Hardware Components](#4-hardware-components)
+- [5. I2C Communication and Timeout Handling](#5-i2c-communication-and-timeout-handling)
+  - [5.1. Problem](#51-problem)
+  - [5.2. Solution](#52-solution)
+  - [5.3. Affected Operations](#53-affected-operations)
+  - [5.4. Diagnostics](#54-diagnostics)
+- [6. Board Auto-Recovery (Future Enhancement)](#6-board-auto-recovery-future-enhancement)
+  - [6.1. Summary](#61-summary)
+  - [6.2. Background](#62-background)
+  - [6.3. Configuration (Environment Variables)](#63-configuration-environment-variables)
+  - [6.4. API Changes](#64-api-changes)
+  - [6.5. Implementation Details](#65-implementation-details)
+  - [6.6. Success Criteria](#66-success-criteria)
+  - [6.7. Non-Goals (Explicitly Out of Scope)](#67-non-goals-explicitly-out-of-scope)
+- [7. Reinitialize API Sequence Diagram](#7-reinitialize-api-sequence-diagram)
+  - [7.1. Key Components](#71-key-components)
+  - [7.2. Communication Channels](#72-communication-channels)
+  - [7.3. Critical Timing](#73-critical-timing)
+- [8. References](#8-references)
+
+
+## 1. Overview
 
 The [Bitaxe Gamma](https://github.com/bitaxeorg/bitaxegamma) is an open-source Bitcoin
 mining board featuring a single BM1370 ASIC chip (from Antminer S21 Pro) and
 an ESP32-S3 microcontroller. The board connects to mujina-miner via USB and
 provides on-board power management and thermal control.
 
-## Firmware Requirements
+## 2. Firmware Requirements
 
 **The Bitaxe Gamma must be running the
 [bitaxe-raw](https://github.com/bitaxeorg/bitaxe-raw) firmware to work with
@@ -20,7 +44,7 @@ See the [bitaxe-raw flashing
 instructions](https://github.com/bitaxeorg/bitaxe-raw#flashing) to install
 the required firmware on your board.
 
-## Board Architecture
+## 3. Board Architecture
 
 The board presents two USB CDC ACM serial ports when connected:
 - `/dev/ttyACM0` - Control channel for board management (power, thermal, GPIO)
@@ -30,7 +54,7 @@ The control channel uses the bitaxe-raw protocol to tunnel I2C, GPIO, and ADC
 operations over USB, allowing mujina-miner to manage board peripherals without
 custom kernel drivers.
 
-## Hardware Components
+## 4. Hardware Components
 
 - **BM1370 ASIC**: Single chip capable of approximately 640 GH/s
 - **TPS546D24A**: PMBus-compatible power management IC for core voltage control
@@ -39,9 +63,9 @@ custom kernel drivers.
 Implementation details for these components are in the board and peripheral
 modules.
 
-## I2C Communication and Timeout Handling
+## 5. I2C Communication and Timeout Handling
 
-### Problem
+### 5.1. Problem
 
 The TPS546D24A voltage regulator is accessed via I2C through the bitaxe-raw
 protocol over USB serial. In rare cases, I2C communication can hang
@@ -57,7 +81,7 @@ encounters a hung I2C operation, it blocks indefinitely. This prevents the REST
 API from accessing the same controller to read board status, causing API
 requests (like `GET /api/v1/boards`) to hang and never return.
 
-### Solution
+### 5.2. Solution
 
 All I2C operations that acquire locks on shared resources (voltage controllers,
 fan controllers) now use 500ms timeouts:
@@ -79,7 +103,7 @@ This ensures:
 - Warning messages are logged when timeouts occur
 - Board monitoring continues despite communication failures
 
-### Affected Operations
+### 5.3. Affected Operations
 
 Timeout protection is applied to:
 
@@ -92,7 +116,7 @@ Timeout protection is applied to:
 - `GET /api/v1/boards` - board voltage reads
 - `POST /api/v1/board/{serial}/voltage` - voltage set operations
 
-### Diagnostics
+### 5.4. Diagnostics
 
 When I2C communication issues occur, you'll see warnings in the logs:
 
@@ -107,15 +131,15 @@ If you see these warnings persistently, check:
 3. bitaxe-raw firmware version
 4. USB host controller stability
 
-## Board Auto-Recovery (Future Enhancement)
+## 6. Board Auto-Recovery (Future Enhancement)
 
-### Summary
+### 6.1. Summary
 Automatic recovery for boards experiencing I2C communication failures, with configurable retry parameters via environment variables.
 
-### Background
+### 6.2. Background
 Currently, when a board experiences persistent I2C failures (e.g., due to USB issues, firmware bugs, or hardware faults), it remains in a degraded state with error messages but requires manual intervention to recover. This feature adds automatic recovery capability with manual override.
 
-### Configuration (Environment Variables)
+### 6.3. Configuration (Environment Variables)
 ```bash
 # Number of consecutive failures before marking board as needing recovery
 MUJINA_BOARD_FAILURE_THRESHOLD=3  # Default: 3
@@ -130,7 +154,7 @@ MUJINA_BOARD_RETRY_INTERVAL=30  # Default: 30
 MUJINA_BOARD_AUTO_RECOVERY=false  # Default: false
 ```
 
-### API Changes
+### 6.4. API Changes
 
 **Extended BoardStatus Schema:**
 ```rust
@@ -158,7 +182,7 @@ Response:
 }
 ```
 
-### Implementation Details
+### 6.5. Implementation Details
 
 **State Tracking:**
 - Add `HashMap<String, BoardHealthState>` to `AppState`
@@ -189,7 +213,7 @@ Response:
 - Create new thread after successful reinitialization
 - Use proper synchronization to prevent concurrent reinit attempts
 
-### Success Criteria
+### 6.6. Success Criteria
 - Environment variables correctly configure retry behavior
 - Failure counter increments on I2C errors, resets on success
 - `needs_reinit` flag appears in API response when threshold reached
@@ -201,13 +225,13 @@ Response:
 - Old monitoring thread cleanly terminates before new one starts
 - Swagger UI documents the new endpoint and schema fields
 
-### Non-Goals (Explicitly Out of Scope)
+### 6.7. Non-Goals (Explicitly Out of Scope)
 - Metrics/telemetry tracking
 - Per-board retry configuration (global only)
 - Partial reinitialization (always full reprobe)
 - Recovery success rate tracking
 
-## Reinitialize API Sequence Diagram
+## 7. Reinitialize API Sequence Diagram
 
 The following diagram shows the internal component interactions when the
 `POST /api/v1/board/{serial}/reinitialize` endpoint is invoked.
@@ -254,7 +278,7 @@ sequenceDiagram
     Note over BP: Releases control_channel serial port
     BP->>BP: drop(board)
 
-    Note over BP,HW: Simulated USB reconnect
+    Note over BP,HW: Simulated USB reconnect [1]
     BP->>BP: handle_usb_event(UsbDeviceConnected)
 
     Note over BP,HW: Open serial ports
@@ -289,8 +313,9 @@ sequenceDiagram
 
     API-->>Client: 200 OK {"success": true, ...}
 ```
+* [1] Simulated USB reconnect: No physical USB disconnect occurs. The software invokes handle_usb_event(UsbDeviceConnected) to reuse the standard board initialization path. The prior drop(board) releases the serial port, allowing the "reconnected" board to reopen it.
 
-### Key Components
+### 7.1. Key Components
 
 | Component | Location | Role |
 |-----------|----------|------|
@@ -300,7 +325,7 @@ sequenceDiagram
 | HashThread | `asic/bm13xx/thread.rs` | ASIC communication actor, owns data serial ports |
 | Hardware | Physical | TPS546 (voltage), EMC2101 (fan), GPIO (reset), serial ports |
 
-### Communication Channels
+### 7.2. Communication Channels
 
 | Channel Type | Purpose |
 |--------------|---------|
@@ -310,14 +335,14 @@ sequenceDiagram
 | Serial (control) | Board → ESP32 → I2C peripherals |
 | Serial (data) | HashThread → ESP32 → BM1370 ASIC |
 
-### Critical Timing
+### 7.3. Critical Timing
 
 The `drop(board)` call before `handle_usb_event` is essential. The old board
 holds the control channel serial port (`/dev/ttyACMx`). If not explicitly
 dropped before reprobing, the new board creation fails with "Device or
 resource busy" because the OS still sees the port as open.
 
-## References
+## 8. References
 
 - [Bitaxe Project](https://bitaxe.org)
 - [Bitaxe Gamma Hardware](https://github.com/bitaxeorg/bitaxeGamma)
