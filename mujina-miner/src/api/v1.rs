@@ -115,18 +115,21 @@ pub struct BoardStatus {
     /// Serial number
     #[schema(example = "ABC12345")]
     pub serial_number: String,
-    /// Whether the board is currently connected
-    #[schema(example = true)]
-    pub connected: bool,
     /// Whether voltage control is available for this board
     #[schema(example = true)]
     pub voltage_control_available: bool,
     /// Current voltage in volts (if voltage control is available)
     #[schema(example = 1.2)]
     pub current_voltage_v: Option<f32>,
-    /// Error message if the board is experiencing issues (e.g., I2C communication failure)
+    /// Board temperature in degrees Celsius (from external sensor, e.g., EMC2101)
+    #[schema(example = 45.5)]
+    pub board_temp_c: Option<f32>,
+    /// Fan speed in RPM (from fan controller, e.g., EMC2101)
+    #[schema(example = 4500)]
+    pub fan_speed_rpm: Option<u16>,
+    /// Transient I2C communication error (e.g., voltage read timeout)
     #[schema(example = "I2C communication timeout")]
-    pub error: Option<String>,
+    pub transient_i2c_error: Option<String>,
     /// Whether the board needs reinitialization due to consecutive failures
     #[schema(example = false)]
     pub needs_reinit: bool,
@@ -136,12 +139,6 @@ pub struct BoardStatus {
     /// Number of automatic retry attempts
     #[schema(example = 0)]
     pub retry_count: u32,
-    /// Board temperature in degrees Celsius (from external sensor, e.g., EMC2101)
-    #[schema(example = 45.5)]
-    pub board_temp_c: Option<f32>,
-    /// Fan speed in RPM (from fan controller, e.g., EMC2101)
-    #[schema(example = 4500)]
-    pub fan_speed_rpm: Option<u16>,
 }
 
 /// Complete board list response including both active and failed boards.
@@ -446,10 +443,9 @@ impl AppState {
                 model: info.model.clone(),
                 firmware_version: info.firmware_version.clone(),
                 serial_number: serial.clone(),
-                connected: true,
                 voltage_control_available: has_voltage_controller,
                 current_voltage_v: current_voltage,
-                error: board_error,
+                transient_i2c_error: board_error,
                 needs_reinit,
                 consecutive_failures: health.consecutive_failures,
                 retry_count: health.retry_count,
