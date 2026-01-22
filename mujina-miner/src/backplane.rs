@@ -198,6 +198,7 @@ impl Backplane {
 
             // Unregister from API
             self.api_state.unregister_voltage_controller(serial).await;
+            self.api_state.unregister_fan_controller(serial).await;
             self.api_state.unregister_board(serial).await;
 
             // Remove from device tracking
@@ -386,6 +387,18 @@ impl Backplane {
                             .register_voltage_controller(board_id.clone(), regulator)
                             .await;
                     }
+
+                    // Register fan controller with API for temperature readings
+                    if let Some(fan_ctrl) = bitaxe_board.get_fan_controller() {
+                        debug!(
+                            board = %board_info.model,
+                            serial = %board_id,
+                            "Registering fan controller with API"
+                        );
+                        self.api_state
+                            .register_fan_controller(board_id.clone(), fan_ctrl)
+                            .await;
+                    }
                 }
 
                 // Create hash threads from the board
@@ -457,8 +470,9 @@ impl Backplane {
                             }
                         }
 
-                        // Unregister voltage controller and board info from API
+                        // Unregister voltage controller, fan controller, and board info from API
                         self.api_state.unregister_voltage_controller(&board_id).await;
+                        self.api_state.unregister_fan_controller(&board_id).await;
                         self.api_state.unregister_board(&board_id).await;
 
                         // Don't re-insert - board is removed

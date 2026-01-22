@@ -301,3 +301,23 @@ The selected approach trades slightly more initial setup complexity for better l
 ✅ **Complete** - All code implemented and compiles successfully
 
 The implementation is production-ready and follows Rust best practices for async programming, error handling, and concurrent access patterns.
+
+== board_temp
+
+Previously, the fan_controller in BitaxeBoard was indeed managed, but only internally - it wasn't exposed for external access.
+
+Before changes:
+
+BitaxeBoard had fan_controller: Option<Emc2101<BitaxeRawI2c>> (not wrapped in Arc<Mutex<>>)
+It was initialized in init_fan_controller() and set to 100% speed
+It was used during shutdown to reduce fan speed to 25%
+The stats monitoring task read temperature from it every 30 seconds for logging purposes
+However, there was no API exposure - the temperature was only logged internally, not returned via the REST API. The BoardStatus struct had no temperature field, and there was no get_fan_controller() method to allow external access.
+
+The voltage regulator (Tps546) followed a different pattern:
+
+Wrapped in Arc<Mutex<>> for shared access
+Had a get_voltage_regulator() public method
+Was registered with AppState via register_voltage_controller()
+Was exposed through the API's current_voltage_v field
+My changes essentially replicated this pattern for the fan controller to enable temperature exposure via the API.

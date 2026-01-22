@@ -18,11 +18,14 @@ use crate::{
     board::BoardInfo,
     hw_trait::I2c,
     mgmt_protocol::bitaxe_raw::i2c::BitaxeRawI2c,
-    peripheral::tps546::Tps546,
+    peripheral::{emc2101::Emc2101, tps546::Tps546},
 };
 
 /// Voltage controller handle for a board.
 pub type VoltageControllerHandle = Arc<Mutex<Tps546<BitaxeRawI2c>>>;
+
+/// Fan controller handle for a board (provides temperature readings).
+pub type FanControllerHandle = Arc<Mutex<Emc2101<BitaxeRawI2c>>>;
 
 /// Board health state tracking for auto-recovery.
 #[derive(Debug, Clone)]
@@ -133,6 +136,12 @@ pub struct BoardStatus {
     /// Number of automatic retry attempts
     #[schema(example = 0)]
     pub retry_count: u32,
+    /// Board temperature in degrees Celsius (from external sensor, e.g., EMC2101)
+    #[schema(example = 45.5)]
+    pub board_temp_c: Option<f32>,
+    /// Fan speed in RPM (from fan controller, e.g., EMC2101)
+    #[schema(example = 4500)]
+    pub fan_speed_rpm: Option<u16>,
 }
 
 /// Complete board list response including both active and failed boards.
@@ -149,6 +158,8 @@ pub struct BoardListResponse {
 pub struct AppState {
     /// Registry of voltage controllers by board serial number
     pub voltage_controllers: Arc<RwLock<HashMap<String, VoltageControllerHandle>>>,
+    /// Registry of fan controllers by board serial number (for temperature readings)
+    pub fan_controllers: Arc<RwLock<HashMap<String, FanControllerHandle>>>,
     /// Registry of board information by serial number
     pub boards: Arc<RwLock<HashMap<String, BoardInfo>>>,
     /// Registry of failed board initialization attempts
@@ -165,6 +176,7 @@ impl Default for AppState {
     fn default() -> Self {
         Self {
             voltage_controllers: Arc::new(RwLock::new(HashMap::new())),
+            fan_controllers: Arc::new(RwLock::new(HashMap::new())),
             boards: Arc::new(RwLock::new(HashMap::new())),
             failed_boards: Arc::new(RwLock::new(Vec::new())),
             board_health: Arc::new(RwLock::new(HashMap::new())),
@@ -193,6 +205,22 @@ impl AppState {
     /// Unregister a voltage controller for a board.
     pub async fn unregister_voltage_controller(&self, serial: &str) {
         let mut controllers = self.voltage_controllers.write().await;
+        controllers.remove(serial);
+    }
+
+    /// Register a fan controller for a board (provides temperature readings).
+    pub async fn register_fan_controller(
+        &self,
+        serial: String,
+        controller: FanControllerHandle,
+    ) {
+        let mut controllers = self.fan_controllers.write().await;
+        controllers.insert(serial, controller);
+    }
+
+    /// Unregister a fan controller for a board.
+    pub async fn unregister_fan_controller(&self, serial: &str) {
+        let mut controllers = self.fan_controllers.write().await;
         controllers.remove(serial);
     }
 
@@ -228,13 +256,15 @@ impl AppState {
     /// Get a list of all registered boards with their status.
     pub async fn get_board_list(&self) -> BoardListResponse {
         let boards = self.boards.read().await;
-        let controllers = self.voltage_controllers.read().await;
+        let voltage_controllers = self.voltage_controllers.read().await;
+        let fan_controllers = self.fan_controllers.read().await;
         let failed = self.failed_boards.read().await;
         let mut board_health = self.board_health.write().await;
 
         debug!(
             board_count = boards.len(),
-            controller_count = controllers.len(),
+            voltage_controller_count = voltage_controllers.len(),
+            fan_controller_count = fan_controllers.len(),
             failed_count = failed.len(),
             "Getting board list"
         );
@@ -242,12 +272,12 @@ impl AppState {
         let mut active_boards = Vec::new();
 
         for (serial, info) in boards.iter() {
-            let has_controller = controllers.contains_key(serial);
+            let has_voltage_controller = voltage_controllers.contains_key(serial);
 
             // Read current voltage if controller is available and track any errors
             let mut board_error: Option<String> = None;
-            let current_voltage = if has_controller {
-                if let Some(controller) = controllers.get(serial) {
+            let current_voltage = if has_voltage_controller {
+                if let Some(controller) = voltage_controllers.get(serial) {
                     // Use timeout to prevent blocking on hung I2C operations
                     let voltage_future = async {
                         controller.lock().await.get_vout().await
@@ -334,6 +364,80 @@ impl AppState {
                 None
             };
 
+            // Read board temperature and fan speed if fan controller is available
+            let (board_temp, fan_speed_rpm) = if let Some(fan_ctrl) = fan_controllers.get(serial) {
+                let temp_future = async {
+                    fan_ctrl.lock().await.get_external_temperature().await
+                };
+
+                let temp = match tokio::time::timeout(
+                    tokio::time::Duration::from_millis(500),
+                    temp_future
+                ).await {
+                    Ok(Ok(temp_c)) => {
+                        debug!(
+                            serial = %serial,
+                            temperature = temp_c,
+                            "Read board temperature"
+                        );
+                        Some(temp_c)
+                    }
+                    Ok(Err(e)) => {
+                        warn!(
+                            serial = %serial,
+                            error = %e,
+                            "Failed to read board temperature"
+                        );
+                        // Don't set board_error for temperature failures - voltage is more critical
+                        None
+                    }
+                    Err(_) => {
+                        warn!(
+                            serial = %serial,
+                            "Timeout reading board temperature"
+                        );
+                        None
+                    }
+                };
+
+                let rpm_future = async {
+                    fan_ctrl.lock().await.get_rpm().await
+                };
+
+                let rpm = match tokio::time::timeout(
+                    tokio::time::Duration::from_millis(500),
+                    rpm_future
+                ).await {
+                    Ok(Ok(rpm)) => {
+                        debug!(
+                            serial = %serial,
+                            fan_rpm = rpm,
+                            "Read fan speed"
+                        );
+                        Some(rpm as u16)
+                    }
+                    Ok(Err(e)) => {
+                        warn!(
+                            serial = %serial,
+                            error = %e,
+                            "Failed to read fan speed"
+                        );
+                        None
+                    }
+                    Err(_) => {
+                        warn!(
+                            serial = %serial,
+                            "Timeout reading fan speed"
+                        );
+                        None
+                    }
+                };
+
+                (temp, rpm)
+            } else {
+                (None, None)
+            };
+
             // Get health state for this board
             let health = board_health.entry(serial.clone()).or_default();
             let needs_reinit = health.consecutive_failures >= self.recovery_config.failure_threshold;
@@ -343,12 +447,14 @@ impl AppState {
                 firmware_version: info.firmware_version.clone(),
                 serial_number: serial.clone(),
                 connected: true,
-                voltage_control_available: has_controller,
+                voltage_control_available: has_voltage_controller,
                 current_voltage_v: current_voltage,
                 error: board_error,
                 needs_reinit,
                 consecutive_failures: health.consecutive_failures,
                 retry_count: health.retry_count,
+                board_temp_c: board_temp,
+                fan_speed_rpm,
             });
         }
 

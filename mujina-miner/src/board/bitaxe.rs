@@ -121,8 +121,8 @@ pub struct BitaxeBoard {
     asic_nrst: Option<BitaxeRawGpioPin>,
     /// I2C bus controller
     i2c: BitaxeRawI2c,
-    /// Fan controller (board-controlled only, not shared with thread)
-    fan_controller: Option<Emc2101<BitaxeRawI2c>>,
+    /// Fan controller (shared for API access to temperature readings)
+    fan_controller: Option<Arc<Mutex<Emc2101<BitaxeRawI2c>>>>,
     /// Voltage regulator (shared with thread, cached state)
     regulator: Option<Arc<Mutex<Tps546<BitaxeRawI2c>>>>,
     /// Writer for sending commands to chips (transferred to hash thread)
@@ -153,6 +153,15 @@ impl BitaxeBoard {
     /// initialized.
     pub fn get_voltage_regulator(&self) -> Option<Arc<Mutex<Tps546<BitaxeRawI2c>>>> {
         self.regulator.clone()
+    }
+
+    /// Get the fan controller handle for API access.
+    ///
+    /// Returns a cloned Arc to the EMC2101 fan controller if available,
+    /// allowing the API to read board temperature. Returns None if the
+    /// controller is not initialized.
+    pub fn get_fan_controller(&self) -> Option<Arc<Mutex<Emc2101<BitaxeRawI2c>>>> {
+        self.fan_controller.clone()
     }
 
     /// Bitaxe Gamma board configuration
@@ -482,7 +491,7 @@ impl BitaxeBoard {
                     }
                 }
 
-                self.fan_controller = Some(fan);
+                self.fan_controller = Some(Arc::new(Mutex::new(fan)));
                 Ok(())
             }
             Err(e) => {
@@ -906,9 +915,9 @@ impl Board for BitaxeBoard {
         }
 
         // Reduce fan speed (no more heat generation)
-        if let Some(ref mut fan) = self.fan_controller {
+        if let Some(ref fan) = self.fan_controller {
             let shutdown_speed = Percent::new_clamped(25);
-            if let Err(e) = fan.set_fan_speed(shutdown_speed).await {
+            if let Err(e) = fan.lock().await.set_fan_speed(shutdown_speed).await {
                 warn!("Failed to set fan speed: {}", e);
             }
         }
