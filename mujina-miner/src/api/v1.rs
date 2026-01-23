@@ -167,10 +167,22 @@ pub struct AppState {
     pub recovery_config: BoardRecoveryConfig,
     /// Command channel to backplane for board operations (optional for testing)
     pub backplane_cmd_tx: Option<mpsc::Sender<BackplaneCommand>>,
+    /// Board initialization timeout (read from MUJINA_BOARD_INIT_TIMEOUT_SECS at startup)
+    pub board_init_timeout: Duration,
 }
+
+/// Default board initialization timeout in seconds.
+pub const DEFAULT_BOARD_INIT_TIMEOUT_SECS: u64 = 10;
 
 impl Default for AppState {
     fn default() -> Self {
+        // Read timeout from environment or use default
+        let board_init_timeout = std::env::var("MUJINA_BOARD_INIT_TIMEOUT_SECS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .map(Duration::from_secs)
+            .unwrap_or(Duration::from_secs(DEFAULT_BOARD_INIT_TIMEOUT_SECS));
+
         Self {
             voltage_controllers: Arc::new(RwLock::new(HashMap::new())),
             fan_controllers: Arc::new(RwLock::new(HashMap::new())),
@@ -179,6 +191,7 @@ impl Default for AppState {
             board_health: Arc::new(RwLock::new(HashMap::new())),
             recovery_config: BoardRecoveryConfig::default(),
             backplane_cmd_tx: None,
+            board_init_timeout,
         }
     }
 }
@@ -248,6 +261,13 @@ impl AppState {
         );
         let mut failed_boards = self.failed_boards.write().await;
         failed_boards.push(failed);
+    }
+
+    /// Remove a failed board from the failed boards list (e.g., during reinitialization).
+    pub async fn remove_failed_board(&self, serial: &str) {
+        let mut failed_boards = self.failed_boards.write().await;
+        failed_boards.retain(|b| b.serial_number.as_deref() != Some(serial));
+        debug!(serial = %serial, "Removed failed board from list");
     }
 
     /// Get a list of all registered boards with their status.
@@ -758,15 +778,20 @@ async fn reinitialize_board(
         "API request to reinitialize board"
     );
 
-    // Check if board exists
+    // Check if board exists (in active boards or failed boards)
     let boards = state.boards.read().await;
-    if !boards.contains_key(&serial) {
+    let failed_boards = state.failed_boards.read().await;
+    let in_active = boards.contains_key(&serial);
+    let in_failed = failed_boards.iter().any(|b| b.serial_number.as_deref() == Some(&serial));
+    drop(boards);
+    drop(failed_boards);
+
+    if !in_active && !in_failed {
         let error = ErrorResponse {
             error: format!("Board with serial '{}' not found", serial),
         };
         return (StatusCode::NOT_FOUND, Json(error)).into_response();
     }
-    drop(boards);
 
     // Get current health state to capture previous error
     let mut board_health = state.board_health.write().await;
@@ -820,7 +845,9 @@ async fn reinitialize_board(
         }
 
         // Wait for response from backplane (with timeout)
-        match tokio::time::timeout(Duration::from_secs(10), response_rx).await {
+        // Timeout must be longer than board init timeout to allow init to complete
+        let api_timeout = state.board_init_timeout + Duration::from_secs(5);
+        match tokio::time::timeout(api_timeout, response_rx).await {
             Ok(Ok(result)) => {
                 warn!(
                     serial = %serial,

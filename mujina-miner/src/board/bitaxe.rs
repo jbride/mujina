@@ -1013,7 +1013,14 @@ async fn create_from_usb(
     );
 
     // Open control port at 115200 baud
-    let control_port = tokio_serial::new(&serial_ports[0], 115200).open_native_async()?;
+    // Use spawn_blocking to prevent blocking the async runtime if the serial port open hangs
+    let control_path = serial_ports[0].clone();
+    let control_port = tokio::task::spawn_blocking(move || {
+        tokio_serial::new(&control_path, 115200).open_native_async()
+    })
+    .await
+    .map_err(|e| crate::error::Error::Hardware(format!("Serial port open task failed: {}", e)))?
+    .map_err(|e| crate::error::Error::Hardware(format!("Failed to open control port: {}", e)))?;
 
     // Create the board with the control port and data port path
     let mut board = BitaxeBoard::new(control_port, &serial_ports[1], device.serial_number.clone())

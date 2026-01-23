@@ -11,14 +11,15 @@ This document describes mujina-miner's support for the Bitaxe Gamma board.
   - [5.2. Solution](#52-solution)
   - [5.3. Affected Operations](#53-affected-operations)
   - [5.4. Diagnostics](#54-diagnostics)
-- [6. Board Auto-Recovery (Future Enhancement)](#6-board-auto-recovery-future-enhancement)
-  - [6.1. Summary](#61-summary)
-  - [6.2. Background](#62-background)
-  - [6.3. Configuration (Environment Variables)](#63-configuration-environment-variables)
-  - [6.4. API Changes](#64-api-changes)
-  - [6.5. Implementation Details](#65-implementation-details)
-  - [6.6. Success Criteria](#66-success-criteria)
-  - [6.7. Non-Goals (Explicitly Out of Scope)](#67-non-goals-explicitly-out-of-scope)
+- [6. Board Failure](#6-board-failure)
+  - [6.1. Graceful Recovery](#61-graceful-recovery)
+  - [6.2. Automatic Recovery](#62-automatic-recovery)
+  - [6.3. Background](#63-background)
+  - [6.4. Configuration (Environment Variables)](#64-configuration-environment-variables)
+  - [6.5. API Changes](#65-api-changes)
+  - [6.6. Implementation Details](#66-implementation-details)
+  - [6.7. Success Criteria](#67-success-criteria)
+  - [6.8. Non-Goals (Explicitly Out of Scope)](#68-non-goals-explicitly-out-of-scope)
 - [7. Reinitialize API Sequence Diagram](#7-reinitialize-api-sequence-diagram)
   - [7.1. Key Components](#71-key-components)
   - [7.2. Communication Channels](#72-communication-channels)
@@ -131,110 +132,83 @@ If you see these warnings persistently, check:
 3. bitaxe-raw firmware version
 4. USB host controller stability
 
-## 6. Board Auto-Recovery (Future Enhancement)
+## 6. Board Failure and Recovery
 
-### 6.1. Summary
-Automatic recovery for boards experiencing I2C communication failures, with configurable retry parameters via environment variables.
+### 6.1. Configuration
 
-### 6.2. Background
-Currently, when a board experiences persistent I2C failures (e.g., due to USB issues, firmware bugs, or hardware faults), it remains in a degraded state with error messages but requires manual intervention to recover. This feature adds automatic recovery capability with manual override.
-
-### 6.3. Configuration (Environment Variables)
 ```bash
-# Number of consecutive failures before marking board as needing recovery
-MUJINA_BOARD_FAILURE_THRESHOLD=3  # Default: 3
-
-# Number of automatic retry attempts before giving up
-MUJINA_BOARD_MAX_AUTO_RETRIES=3  # Default: 3
-
-# Duration between automatic retry attempts (seconds)
-MUJINA_BOARD_RETRY_INTERVAL=30  # Default: 30
-
-# Enable/disable automatic recovery (if false, manual only)
-MUJINA_BOARD_AUTO_RECOVERY=false  # Default: false
+# Board initialization timeout in seconds (also used for reinitialize API timeout + 5s buffer)
+# Read once at startup and stored in AppState.board_init_timeout
+MUJINA_BOARD_INIT_TIMEOUT_SECS=10  # Default: 10
 ```
 
-### 6.4. API Changes
+### 6.2. Failed Board Tracking
 
-**Extended BoardStatus Schema:**
+When board initialization fails (error, panic, or timeout), the system:
+1. Stores `UsbDeviceInfo` in `Backplane.failed_board_devices` HashMap
+2. Registers the failure in `AppState.failed_boards` for API visibility
+3. Aborts any stuck initialization tasks to release serial port resources
+
+This allows failed boards to be reinitialized later via the API without requiring
+a physical USB reconnect.
+
+### 6.3. Timeout Handling
+
+Board initialization uses `tokio::select!` to race the init task against a timeout:
+- On timeout: the spawned task is explicitly aborted via `task.abort()`
+- After abort: waits for task completion and adds 100ms delay for OS to release serial ports
+- Serial port open uses `spawn_blocking` to prevent blocking the async runtime
+
+**Timeout Chain:**
+```
+Board Init Timeout (MUJINA_BOARD_INIT_TIMEOUT_SECS, default 10s)
+    └── API Reinitialize Timeout = Board Init Timeout + 5s buffer
+```
+
+### 6.4. Control Channel Timeouts
+
+All I2C and GPIO operations through the control channel have timeouts:
+- Lock acquisition: 2 seconds (prevents deadlocks)
+- Write operation: 1 second
+- Read operation: 1 second
+
 ```rust
-pub struct BoardStatus {
-    // ... existing fields ...
-    pub error: Option<String>,           // Already implemented
-    pub needs_reinit: bool,               // NEW: true when consecutive_failures >= threshold
-    pub consecutive_failures: u32,        // NEW: failure counter
-    pub retry_count: u32,                 // NEW: auto-retry counter
-}
+// channel.rs timeout structure
+Lock timeout (2s) → Write timeout (1s) → Read timeout (1s)
 ```
 
-**New Endpoint:**
+
+## 7. Reinitialize API
+
+**Endpoint:**
 ```
 POST /api/v1/board/{serial}/reinitialize
 ```
 
-Response:
+**Supports both:**
+- Active boards (in `Backplane.boards`) - shuts down first, then reinitializes
+- Failed boards (in `Backplane.failed_board_devices`) - directly attempts reinitialization
+
+**Response:**
 ```json
 {
   "success": true,
-  "message": "Board reinitialized successfully",
+  "message": "Board '71bfd369' successfully reinitialized",
   "previous_error": "I2C error: WriteRead failed: Response ID mismatch",
   "current_voltage": 1.2
 }
 ```
 
-### 6.5. Implementation Details
+**Error Response (board not found):**
+```json
+{
+  "error": "Board with serial '71bfd369' not found"
+}
+```
 
-**State Tracking:**
-- Add `HashMap<String, BoardHealthState>` to `AppState`
-- Track per-board: consecutive failures, last failure time, retry count, last retry time
+### 7.1. Sequence Diagram (Active Board)
 
-**Recovery Scope:**
-- Fully re-probe board (same as initial discovery)
-- Kill and restart monitoring thread
-- Reset failure counters on success
-
-**Monitoring Thread Changes:**
-1. On I2C failure: increment consecutive failure counter
-2. When counter >= threshold: set `needs_reinit = true` in board status
-3. If auto-recovery enabled AND retry interval elapsed AND retry_count < max_retries:
-   - Log warning: "Attempting automatic board recovery"
-   - Trigger reinitialization
-   - Increment retry_count
-4. On successful read: reset counters
-
-**Logging (all at WARN level):**
-- "Board marked as needing recovery: serial={serial}, consecutive_failures={count}"
-- "Attempting automatic board recovery: serial={serial}, attempt={retry_count}/{max_retries}"
-- "Board recovery successful: serial={serial}"
-- "Board recovery failed: serial={serial}, error={error}"
-
-**Thread Safety:**
-- Kill existing monitoring thread for the board during reinit
-- Create new thread after successful reinitialization
-- Use proper synchronization to prevent concurrent reinit attempts
-
-### 6.6. Success Criteria
-- Environment variables correctly configure retry behavior
-- Failure counter increments on I2C errors, resets on success
-- `needs_reinit` flag appears in API response when threshold reached
-- Manual reinit endpoint works and returns appropriate response
-- Auto-recovery triggers at configured interval when enabled
-- Auto-recovery stops after max_retries attempts
-- All logging events emit at WARN level with structured fields
-- Board fully reprobes (voltage controller + fan controller + monitoring thread)
-- Old monitoring thread cleanly terminates before new one starts
-- Swagger UI documents the new endpoint and schema fields
-
-### 6.7. Non-Goals (Explicitly Out of Scope)
-- Metrics/telemetry tracking
-- Per-board retry configuration (global only)
-- Partial reinitialization (always full reprobe)
-- Recovery success rate tracking
-
-## 7. Reinitialize API Sequence Diagram
-
-The following diagram shows the internal component interactions when the
-`POST /api/v1/board/{serial}/reinitialize` endpoint is invoked.
+The following diagram shows reinitialization of an **active** board.
 
 ```mermaid
 sequenceDiagram
@@ -246,7 +220,7 @@ sequenceDiagram
     participant HW as Hardware
 
     Client->>API: POST /reinitialize
-    API->>API: Check board exists
+    API->>API: Check board in active OR failed list
     API->>API: Reset health counters
 
     Note over API,BP: via mpsc channel
@@ -313,19 +287,81 @@ sequenceDiagram
 
     API-->>Client: 200 OK {"success": true, ...}
 ```
+
+### 7.2. Sequence Diagram (Failed Board)
+
+Reinitialization of a **failed** board skips shutdown steps since the board never
+fully initialized.
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant API as API v1
+    participant BP as Backplane
+    participant Board as BitaxeBoard
+    participant HW as Hardware
+
+    Client->>API: POST /reinitialize
+    API->>API: Check board in active OR failed list
+    API->>API: Reset health counters
+
+    Note over API,BP: via mpsc channel
+    API->>BP: BackplaneCommand::ReinitializeBoard
+
+    BP->>BP: Remove from failed_board_devices
+    BP->>BP: Remove from API failed_boards list
+
+    Note over BP,HW: Retry initialization
+    BP->>BP: handle_usb_event(UsbDeviceConnected)
+
+    Note over BP,HW: Open serial ports (spawn_blocking)
+    BP->>HW: Create new BitaxeBoard
+    HW-->>BP:
+
+    BP->>Board: board.initialize()
+    Board->>HW: hold_in_reset()
+    Board->>HW: init_fan_controller()
+    Board->>HW: init_power_controller()
+    Board->>HW: release_reset()
+    Board->>HW: chip_discovery()
+    Board-->>BP:
+
+    alt Success
+        BP->>BP: Register board with API
+        BP->>BP: Store board in HashMap
+        BP-->>API: ReinitializeResult(success=true)
+        API-->>Client: 200 OK
+    else Failure
+        BP->>BP: Store in failed_board_devices again
+        BP->>BP: Register in failed_boards
+        BP-->>API: ReinitializeResult(success=false)
+        API-->>Client: 500 Error
+    end
+```
+
 * [1] Simulated USB reconnect: No physical USB disconnect occurs. The software invokes handle_usb_event(UsbDeviceConnected) to reuse the standard board initialization path. The prior drop(board) releases the serial port, allowing the "reconnected" board to reopen it.
 
-### 7.1. Key Components
+### 7.3. Key Components
 
 | Component | Location | Role |
 |-----------|----------|------|
 | API v1 | `api/v1.rs` | HTTP endpoint handler, validates request, sends command to backplane |
-| Backplane | `backplane.rs` | Orchestrates board lifecycle, owns board instances |
+| Backplane | `backplane.rs` | Orchestrates board lifecycle, owns board instances and failed_board_devices |
 | BitaxeBoard | `board/bitaxe.rs` | Board abstraction, controls peripherals via control channel |
 | HashThread | `asic/bm13xx/thread.rs` | ASIC communication actor, owns data serial ports |
 | Hardware | Physical | TPS546 (voltage), EMC2101 (fan), GPIO (reset), serial ports |
 
-### 7.2. Communication Channels
+### 7.4. Data Structures
+
+| Structure | Location | Purpose |
+|-----------|----------|---------|
+| `Backplane.boards` | backplane.rs | Active, successfully initialized boards |
+| `Backplane.board_devices` | backplane.rs | UsbDeviceInfo for active boards (for reinit) |
+| `Backplane.failed_board_devices` | backplane.rs | UsbDeviceInfo for failed boards (for reinit) |
+| `AppState.failed_boards` | api/v1.rs | Failed board status visible via REST API |
+| `AppState.board_init_timeout` | api/v1.rs | Timeout read from env at startup |
+
+### 7.5. Communication Channels
 
 | Channel Type | Purpose |
 |--------------|---------|
@@ -335,14 +371,50 @@ sequenceDiagram
 | Serial (control) | Board → ESP32 → I2C peripherals |
 | Serial (data) | HashThread → ESP32 → BM1370 ASIC |
 
-### 7.3. Critical Timing
+### 7.6. Critical Timing
 
-The `drop(board)` call before `handle_usb_event` is essential. The old board
-holds the control channel serial port (`/dev/ttyACMx`). If not explicitly
-dropped before reprobing, the new board creation fails with "Device or
-resource busy" because the OS still sees the port as open.
+The `drop(board)` call before `handle_usb_event` is essential for active board
+reinitialization. The old board holds the control channel serial port (`/dev/ttyACMx`).
+If not explicitly dropped before reprobing, the new board creation fails with
+"Device or resource busy" because the OS still sees the port as open.
 
-## 8. References
+For failed boards, the initialization task is aborted and we wait 100ms after
+abort to ensure the OS releases serial port handles.
+
+## 8. Automatic Recovery (Future)
+Automatic recovery for boards experiencing I2C communication failures, with configurable retry parameters via environment variables.
+
+### 8.1. Background
+Currently, when a board experiences persistent I2C failures (e.g., due to USB issues, firmware bugs, or hardware faults), it remains in a degraded state with error messages but requires manual intervention to recover. This feature adds automatic recovery capability with manual override.
+
+### 8.2. Success Criteria
+- Environment variables correctly configure retry behavior
+- Failure counter increments on I2C errors, resets on success
+- `needs_reinit` flag appears in API response when threshold reached
+- Manual reinit endpoint works and returns appropriate response
+- Auto-recovery triggers at configured interval when enabled
+- Auto-recovery stops after max_retries attempts
+- All logging events emit at WARN level with structured fields
+- Board fully reprobes (voltage controller + fan controller + monitoring thread)
+- Old monitoring thread cleanly terminates before new one starts
+- Swagger UI documents the new endpoint and schema fields
+
+### 8.3. Configuration (Environment Variables)
+```bash
+# Number of consecutive failures before marking board as needing recovery
+MUJINA_BOARD_FAILURE_THRESHOLD=3  # Default: 3
+
+# Number of automatic retry attempts before giving up
+MUJINA_BOARD_MAX_AUTO_RETRIES=3  # Default: 3
+
+# Duration between automatic retry attempts (seconds)
+MUJINA_BOARD_RETRY_INTERVAL=30  # Default: 30
+
+# Enable/disable automatic recovery (if false, manual only)
+MUJINA_BOARD_AUTO_RECOVERY=false  # Default: false
+```
+
+## 9. References
 
 - [Bitaxe Project](https://bitaxe.org)
 - [Bitaxe Gamma Hardware](https://github.com/bitaxeorg/bitaxeGamma)

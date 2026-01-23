@@ -20,14 +20,6 @@ use crate::{
 use std::{collections::HashMap, time::Duration};
 use tokio::sync::mpsc;
 
-/// Get board initialization timeout from environment or use default.
-fn get_board_init_timeout() -> Duration {
-    std::env::var("MUJINA_BOARD_INIT_TIMEOUT_SECS")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .map(Duration::from_secs)
-        .unwrap_or(Duration::from_secs(30))
-}
 
 /// Board registry that uses inventory to find registered boards.
 pub struct BoardRegistry;
@@ -59,6 +51,8 @@ pub struct Backplane {
     boards: HashMap<String, Box<dyn Board + Send>>,
     /// Device info for each board (for reinitialization)
     board_devices: HashMap<String, UsbDeviceInfo>,
+    /// Device info for failed boards (for reinitialization attempts)
+    failed_board_devices: HashMap<String, UsbDeviceInfo>,
     event_rx: mpsc::Receiver<TransportEvent>,
     /// Command channel for external control (API, MQTT, etc.)
     cmd_rx: mpsc::Receiver<BackplaneCommand>,
@@ -81,6 +75,7 @@ impl Backplane {
             virtual_registry: VirtualBoardRegistry,
             boards: HashMap::new(),
             board_devices: HashMap::new(),
+            failed_board_devices: HashMap::new(),
             event_rx,
             cmd_rx,
             scheduler_tx,
@@ -150,28 +145,97 @@ impl Backplane {
     }
 
     /// Reinitialize a specific board by serial number.
+    ///
+    /// This handles both active boards (in `self.boards`) and failed boards
+    /// (in `self.failed_board_devices`).
     async fn reinitialize_board(&mut self, serial: &str) -> ReinitializeResult {
-        // Check if board exists
-        if !self.boards.contains_key(serial) {
+        // Check if this is an active board or a failed board
+        let is_active = self.boards.contains_key(serial);
+        let is_failed = self.failed_board_devices.contains_key(serial);
+
+        if !is_active && !is_failed {
             return ReinitializeResult::failure(
                 "Board not found".to_string(),
-                format!("No board with serial '{}' is currently active", serial),
+                format!("No board with serial '{}' found in active or failed boards", serial),
             );
         }
 
-        // Get the device info before removing the board
-        let device_info = match self.board_devices.get(serial) {
-            Some(info) => info.clone(),
-            None => {
-                return ReinitializeResult::failure(
-                    "Device info not found".to_string(),
-                    format!("No device info stored for board '{}'", serial),
-                );
-            }
-        };
+        // Handle failed board reinitialization
+        if is_failed {
+            let device_info = self.failed_board_devices.remove(serial).unwrap();
 
-        // Remove the board
-        if let Some(mut board) = self.boards.remove(serial) {
+            info!(
+                serial = %serial,
+                "Attempting to reinitialize failed board"
+            );
+
+            // Remove from failed boards list in API state
+            self.api_state.remove_failed_board(serial).await;
+
+            // Re-probe the device to reinitialize it
+            match self.handle_usb_event(UsbTransportEvent::UsbDeviceConnected(device_info)).await {
+                Ok(()) => {
+                    // Check if board is now active (success) or still failed
+                    if self.boards.contains_key(serial) {
+                        info!(
+                            serial = %serial,
+                            "Failed board successfully reinitialized"
+                        );
+
+                        // Try to read the new voltage
+                        let new_voltage = if let Some(controller) = self.api_state.voltage_controllers.read().await.get(serial) {
+                            match tokio::time::timeout(
+                                Duration::from_millis(500),
+                                async { controller.lock().await.get_vout().await }
+                            ).await {
+                                Ok(Ok(mv)) => Some(mv as f32 / 1000.0),
+                                _ => None,
+                            }
+                        } else {
+                            None
+                        };
+
+                        ReinitializeResult::success(
+                            format!("Board '{}' successfully reinitialized", serial),
+                            new_voltage,
+                        )
+                    } else {
+                        // Board failed again - it will be in failed_board_devices again
+                        ReinitializeResult::failure(
+                            "Reinitialization failed".to_string(),
+                            "Board failed to initialize again".to_string(),
+                        )
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        serial = %serial,
+                        error = %e,
+                        "Failed to reprobe failed board"
+                    );
+
+                    ReinitializeResult::failure(
+                        "Reprobe failed".to_string(),
+                        format!("Reprobe error: {}", e),
+                    )
+                }
+            }
+        } else {
+            // Handle active board reinitialization
+
+            // Get the device info before removing the board
+            let device_info = match self.board_devices.get(serial) {
+                Some(info) => info.clone(),
+                None => {
+                    return ReinitializeResult::failure(
+                        "Device info not found".to_string(),
+                        format!("No device info stored for board '{}'", serial),
+                    );
+                }
+            };
+
+            // Remove the board
+            if let Some(mut board) = self.boards.remove(serial) {
             let board_info = board.board_info();
             let model = board_info.model.clone();
 
@@ -254,11 +318,12 @@ impl Backplane {
                     )
                 }
             }
-        } else {
-            ReinitializeResult::failure(
-                "Failed to remove board".to_string(),
-                format!("Board '{}' disappeared during reinitialization", serial),
-            )
+            } else {
+                ReinitializeResult::failure(
+                    "Failed to remove board".to_string(),
+                    format!("Board '{}' disappeared during reinitialization", serial),
+                )
+            }
         }
     }
 
@@ -289,60 +354,89 @@ impl Backplane {
                 let device_info_clone = device_info.clone(); // Save for reinitialization
 
                 // Create the board using the descriptor's factory function with timeout
-                let timeout = get_board_init_timeout();
+                let timeout = self.api_state.board_init_timeout;
                 debug!(
                     board = board_name,
                     timeout_secs = timeout.as_secs(),
                     "Starting board initialization with timeout"
                 );
 
-                // Spawn the initialization task so we can truly abandon it on timeout
-                let create_task = tokio::spawn((descriptor.create_fn)(device_info));
+                // Spawn the initialization task so we can abort it on timeout
+                let mut create_task = tokio::spawn((descriptor.create_fn)(device_info));
 
-                let mut board = match tokio::time::timeout(timeout, create_task).await {
-                    Ok(Ok(Ok(board))) => board,
-                    Ok(Ok(Err(e))) => {
-                        error!(
-                            board = board_name,
-                            error = %e,
-                            "Failed to create board"
-                        );
+                // Use select! to race timeout against task, keeping handle for abort
+                let mut board = tokio::select! {
+                    result = &mut create_task => {
+                        match result {
+                            Ok(Ok(board)) => board,
+                            Ok(Err(e)) => {
+                                error!(
+                                    board = board_name,
+                                    error = %e,
+                                    "Failed to create board"
+                                );
 
-                        // Register the failed board
-                        self.api_state
-                            .register_failed_board(FailedBoardStatus {
-                                model: Some(board_name.to_string()),
-                                serial_number: serial_for_error.clone(),
-                                error: format!("Failed to create board: {}", e),
-                            })
-                            .await;
+                                // Store device info for reinitialization attempts
+                                if let Some(serial) = &serial_for_error {
+                                    self.failed_board_devices.insert(serial.clone(), device_info_clone);
+                                }
 
-                        return Ok(());
+                                // Register the failed board
+                                self.api_state
+                                    .register_failed_board(FailedBoardStatus {
+                                        model: Some(board_name.to_string()),
+                                        serial_number: serial_for_error.clone(),
+                                        error: format!("Failed to create board: {}", e),
+                                    })
+                                    .await;
+
+                                return Ok(());
+                            }
+                            Err(join_error) => {
+                                error!(
+                                    board = board_name,
+                                    error = %join_error,
+                                    "Board initialization task panicked"
+                                );
+
+                                // Store device info for reinitialization attempts
+                                if let Some(serial) = &serial_for_error {
+                                    self.failed_board_devices.insert(serial.clone(), device_info_clone);
+                                }
+
+                                // Register the failed board
+                                self.api_state
+                                    .register_failed_board(FailedBoardStatus {
+                                        model: Some(board_name.to_string()),
+                                        serial_number: serial_for_error.clone(),
+                                        error: format!("Board initialization task panicked: {}", join_error),
+                                    })
+                                    .await;
+
+                                return Ok(());
+                            }
+                        }
                     }
-                    Ok(Err(join_error)) => {
-                        error!(
-                            board = board_name,
-                            error = %join_error,
-                            "Board initialization task panicked"
-                        );
-
-                        // Register the failed board
-                        self.api_state
-                            .register_failed_board(FailedBoardStatus {
-                                model: Some(board_name.to_string()),
-                                serial_number: serial_for_error.clone(),
-                                error: format!("Board initialization task panicked: {}", join_error),
-                            })
-                            .await;
-
-                        return Ok(());
-                    }
-                    Err(_) => {
+                    _ = tokio::time::sleep(timeout) => {
                         error!(
                             board = board_name,
                             timeout_secs = timeout.as_secs(),
-                            "Board initialization timed out (task abandoned)"
+                            "Board initialization timed out, aborting task"
                         );
+
+                        // Abort the stuck task to release serial port resources
+                        create_task.abort();
+
+                        // Wait for abort to complete and resources to be released
+                        let _ = create_task.await;
+
+                        // Give the OS a moment to release serial port handles
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+
+                        // Store device info for reinitialization attempts
+                        if let Some(serial) = &serial_for_error {
+                            self.failed_board_devices.insert(serial.clone(), device_info_clone);
+                        }
 
                         // Register the failed board due to timeout
                         self.api_state
@@ -408,6 +502,10 @@ impl Backplane {
                         self.boards.insert(board_id.clone(), board);
                         // Store device info for reinitialization
                         self.board_devices.insert(board_id.clone(), device_info_clone);
+
+                        // Clean up any previous failed state for this board
+                        self.failed_board_devices.remove(&board_id);
+                        self.api_state.remove_failed_board(&board_id).await;
 
                         // Send threads to scheduler individually
                         for thread in threads {
@@ -540,6 +638,9 @@ impl Backplane {
 
                         // Store board for lifecycle management
                         self.boards.insert(board_id.clone(), board);
+
+                        // Clean up any previous failed state for this board
+                        self.api_state.remove_failed_board(&board_id).await;
 
                         // Send threads to scheduler individually
                         for thread in threads {

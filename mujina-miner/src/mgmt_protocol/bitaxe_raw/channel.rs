@@ -45,19 +45,26 @@ impl ControlChannel {
 
     /// Send a raw packet and wait for response.
     pub async fn send_packet(&self, mut packet: Packet) -> io::Result<Response> {
-        let mut inner = self.inner.lock().await;
+        // Acquire lock with timeout to prevent deadlocks
+        let lock_timeout = Duration::from_secs(2);
+        let mut inner = time::timeout(lock_timeout, self.inner.lock())
+            .await
+            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "Control channel lock timeout (possible deadlock)"))?;
 
         // Assign packet ID
         packet.id = inner.next_id;
         inner.next_id = inner.next_id.wrapping_add(1);
         let expected_id = packet.id;
 
-        // Send the packet (logging happens in encoder)
-        inner.writer.send(packet).await?;
+        // Send the packet with timeout (logging happens in encoder)
+        let write_timeout = Duration::from_secs(1);
+        time::timeout(write_timeout, inner.writer.send(packet))
+            .await
+            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "Control command write timeout"))??;
 
         // Wait for response with matching ID
-        let timeout = Duration::from_secs(1);
-        let response = time::timeout(timeout, async {
+        let read_timeout = Duration::from_secs(1);
+        let response = time::timeout(read_timeout, async {
             match inner.reader.next().await {
                 Some(Ok(resp)) => {
                     if resp.id != expected_id {
@@ -79,7 +86,7 @@ impl ControlChannel {
             }
         })
         .await
-        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "Control command timeout"))??;
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "Control command read timeout"))??;
 
         // Check for protocol errors
         if let Some(error) = response.error() {
