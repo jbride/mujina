@@ -971,3 +971,292 @@ pub fn routes(state: AppState) -> Router {
         .route("/board/:serial/reinitialize", post(reinitialize_board))
         .with_state(state)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ============================================
+    // BoardHealthState tests
+    // ============================================
+
+    #[test]
+    fn test_board_health_state_default() {
+        let state = BoardHealthState::default();
+
+        assert_eq!(state.consecutive_failures, 0);
+        assert!(state.last_failure_time.is_none());
+        assert_eq!(state.retry_count, 0);
+        assert!(state.last_retry_time.is_none());
+    }
+
+    #[test]
+    fn test_board_health_state_clone() {
+        let mut state = BoardHealthState::default();
+        state.consecutive_failures = 5;
+        state.retry_count = 2;
+        state.last_failure_time = Some(Instant::now());
+
+        let cloned = state.clone();
+
+        assert_eq!(cloned.consecutive_failures, 5);
+        assert_eq!(cloned.retry_count, 2);
+        assert!(cloned.last_failure_time.is_some());
+    }
+
+    #[test]
+    fn test_board_health_state_failure_tracking() {
+        let mut state = BoardHealthState::default();
+
+        // Simulate consecutive failures
+        for i in 1..=5 {
+            state.consecutive_failures = i;
+            state.last_failure_time = Some(Instant::now());
+        }
+
+        assert_eq!(state.consecutive_failures, 5);
+        assert!(state.last_failure_time.is_some());
+    }
+
+    // ============================================
+    // BoardRecoveryConfig tests
+    // ============================================
+
+    #[test]
+    fn test_board_recovery_config_default_values() {
+        // Clear any environment variables that might affect the test
+        std::env::remove_var("MUJINA_BOARD_FAILURE_THRESHOLD");
+        std::env::remove_var("MUJINA_BOARD_MAX_AUTO_RETRIES");
+        std::env::remove_var("MUJINA_BOARD_RETRY_INTERVAL");
+        std::env::remove_var("MUJINA_BOARD_AUTO_RECOVERY");
+
+        let config = BoardRecoveryConfig::default();
+
+        assert_eq!(config.failure_threshold, 3);
+        assert_eq!(config.max_auto_retries, 3);
+        assert_eq!(config.retry_interval, Duration::from_secs(30));
+        assert!(!config.auto_recovery_enabled);
+    }
+
+    #[test]
+    fn test_board_recovery_config_clone() {
+        let config = BoardRecoveryConfig {
+            failure_threshold: 5,
+            max_auto_retries: 10,
+            retry_interval: Duration::from_secs(60),
+            auto_recovery_enabled: true,
+        };
+
+        let cloned = config.clone();
+
+        assert_eq!(cloned.failure_threshold, 5);
+        assert_eq!(cloned.max_auto_retries, 10);
+        assert_eq!(cloned.retry_interval, Duration::from_secs(60));
+        assert!(cloned.auto_recovery_enabled);
+    }
+
+    // ============================================
+    // FailedBoardStatus tests
+    // ============================================
+
+    #[test]
+    fn test_failed_board_status_serialization() {
+        let status = FailedBoardStatus {
+            model: Some("Bitaxe Gamma".to_string()),
+            serial_number: Some("ABC12345".to_string()),
+            error: "I2C communication timeout".to_string(),
+        };
+
+        let json = serde_json::to_string(&status).expect("serialization should succeed");
+
+        assert!(json.contains("Bitaxe Gamma"));
+        assert!(json.contains("ABC12345"));
+        assert!(json.contains("I2C communication timeout"));
+    }
+
+    #[test]
+    fn test_failed_board_status_with_none_fields() {
+        let status = FailedBoardStatus {
+            model: None,
+            serial_number: None,
+            error: "Unknown error".to_string(),
+        };
+
+        let json = serde_json::to_string(&status).expect("serialization should succeed");
+
+        assert!(json.contains("null") || json.contains("\"model\":null"));
+        assert!(json.contains("Unknown error"));
+    }
+
+    // ============================================
+    // BoardStatus tests
+    // ============================================
+
+    #[test]
+    fn test_board_status_serialization() {
+        let status = BoardStatus {
+            model: "Bitaxe Gamma".to_string(),
+            firmware_version: Some("2.1.4".to_string()),
+            serial_number: "ABC12345".to_string(),
+            voltage_control_available: true,
+            current_voltage_v: Some(1.15),
+            board_temp_c: Some(45.5),
+            fan_speed_rpm: Some(4500),
+            transient_i2c_error: None,
+            needs_reinit: false,
+            consecutive_failures: 0,
+            retry_count: 0,
+        };
+
+        let json = serde_json::to_string(&status).expect("serialization should succeed");
+
+        assert!(json.contains("Bitaxe Gamma"));
+        assert!(json.contains("1.15"));
+        assert!(json.contains("45.5"));
+        assert!(json.contains("4500"));
+    }
+
+    #[test]
+    fn test_board_status_with_error() {
+        let status = BoardStatus {
+            model: "Bitaxe Gamma".to_string(),
+            firmware_version: None,
+            serial_number: "ABC12345".to_string(),
+            voltage_control_available: true,
+            current_voltage_v: None,
+            board_temp_c: None,
+            fan_speed_rpm: None,
+            transient_i2c_error: Some("I2C timeout".to_string()),
+            needs_reinit: true,
+            consecutive_failures: 5,
+            retry_count: 2,
+        };
+
+        let json = serde_json::to_string(&status).expect("serialization should succeed");
+
+        assert!(json.contains("I2C timeout"));
+        assert!(json.contains("\"needs_reinit\":true"));
+        assert!(json.contains("\"consecutive_failures\":5"));
+    }
+
+    // ============================================
+    // BoardListResponse tests
+    // ============================================
+
+    #[test]
+    fn test_board_list_response_serialization() {
+        let response = BoardListResponse {
+            active_boards: vec![BoardStatus {
+                model: "Bitaxe Gamma".to_string(),
+                firmware_version: Some("bitaxe-raw".to_string()),
+                serial_number: "SERIAL001".to_string(),
+                voltage_control_available: true,
+                current_voltage_v: Some(1.2),
+                board_temp_c: Some(50.0),
+                fan_speed_rpm: Some(5000),
+                transient_i2c_error: None,
+                needs_reinit: false,
+                consecutive_failures: 0,
+                retry_count: 0,
+            }],
+            failed_boards: vec![FailedBoardStatus {
+                model: Some("Bitaxe Gamma".to_string()),
+                serial_number: Some("SERIAL002".to_string()),
+                error: "Init failed".to_string(),
+            }],
+        };
+
+        let json = serde_json::to_string(&response).expect("serialization should succeed");
+
+        assert!(json.contains("active_boards"));
+        assert!(json.contains("failed_boards"));
+        assert!(json.contains("SERIAL001"));
+        assert!(json.contains("SERIAL002"));
+    }
+
+    #[test]
+    fn test_board_list_response_empty() {
+        let response = BoardListResponse {
+            active_boards: vec![],
+            failed_boards: vec![],
+        };
+
+        let json = serde_json::to_string(&response).expect("serialization should succeed");
+
+        assert!(json.contains("\"active_boards\":[]"));
+        assert!(json.contains("\"failed_boards\":[]"));
+    }
+
+    // ============================================
+    // AppState tests
+    // ============================================
+
+    #[test]
+    fn test_app_state_default() {
+        // Clear environment variable to ensure default
+        std::env::remove_var("MUJINA_BOARD_INIT_TIMEOUT_SECS");
+
+        let state = AppState::default();
+
+        assert!(state.backplane_cmd_tx.is_none());
+        assert_eq!(
+            state.board_init_timeout,
+            Duration::from_secs(DEFAULT_BOARD_INIT_TIMEOUT_SECS)
+        );
+    }
+
+    #[test]
+    fn test_app_state_new() {
+        let state = AppState::new();
+
+        assert!(state.backplane_cmd_tx.is_none());
+    }
+
+    // ============================================
+    // API response type tests
+    // ============================================
+
+    #[test]
+    fn test_reinitialize_response_serialization() {
+        let response = ReinitializeResponse {
+            success: true,
+            message: "Board reinitialized successfully".to_string(),
+            previous_error: Some("Previous I2C error".to_string()),
+            current_voltage: Some(1.15),
+        };
+
+        let json = serde_json::to_string(&response).expect("serialization should succeed");
+
+        assert!(json.contains("\"success\":true"));
+        assert!(json.contains("Board reinitialized successfully"));
+        assert!(json.contains("Previous I2C error"));
+        assert!(json.contains("1.15"));
+    }
+
+    #[test]
+    fn test_set_voltage_response_serialization() {
+        let response = SetVoltageResponse {
+            success: true,
+            requested_voltage: 1.2,
+            actual_voltage: Some(1.198),
+            message: Some("Voltage set successfully".to_string()),
+        };
+
+        let json = serde_json::to_string(&response).expect("serialization should succeed");
+
+        assert!(json.contains("\"success\":true"));
+        assert!(json.contains("1.2"));
+        assert!(json.contains("1.198"));
+    }
+
+    #[test]
+    fn test_error_response_serialization() {
+        let response = ErrorResponse {
+            error: "Board not found".to_string(),
+        };
+
+        let json = serde_json::to_string(&response).expect("serialization should succeed");
+
+        assert!(json.contains("Board not found"));
+    }
+}

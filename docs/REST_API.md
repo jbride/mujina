@@ -296,28 +296,206 @@ The Bitaxe board already shares the voltage regulator with hash threads using `A
 
 The selected approach trades slightly more initial setup complexity for better long-term maintainability, performance, and extensibility.
 
-## 7. Implementation Status
 
-✅ **Complete** - All code implemented and compiles successfully
+## 7. Reinitialize API
 
-The implementation is production-ready and follows Rust best practices for async programming, error handling, and concurrent access patterns.
+**Endpoint:**
+```
+POST /api/v1/board/{serial}/reinitialize
+```
 
-== board_temp
+**Supports both:**
+- Active boards (in `Backplane.boards`) - shuts down first, then reinitializes
+- Failed boards (in `Backplane.failed_board_devices`) - directly attempts reinitialization
 
-Previously, the fan_controller in BitaxeBoard was indeed managed, but only internally - it wasn't exposed for external access.
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Board '71bfd369' successfully reinitialized",
+  "previous_error": "I2C error: WriteRead failed: Response ID mismatch",
+  "current_voltage": 1.2
+}
+```
 
-Before changes:
+**Error Response (board not found):**
+```json
+{
+  "error": "Board with serial '71bfd369' not found"
+}
+```
 
-BitaxeBoard had fan_controller: Option<Emc2101<BitaxeRawI2c>> (not wrapped in Arc<Mutex<>>)
-It was initialized in init_fan_controller() and set to 100% speed
-It was used during shutdown to reduce fan speed to 25%
-The stats monitoring task read temperature from it every 30 seconds for logging purposes
-However, there was no API exposure - the temperature was only logged internally, not returned via the REST API. The BoardStatus struct had no temperature field, and there was no get_fan_controller() method to allow external access.
+### 7.1. Sequence Diagram (Active Board)
 
-The voltage regulator (Tps546) followed a different pattern:
+The following diagram shows reinitialization of an **active** board.
 
-Wrapped in Arc<Mutex<>> for shared access
-Had a get_voltage_regulator() public method
-Was registered with AppState via register_voltage_controller()
-Was exposed through the API's current_voltage_v field
-My changes essentially replicated this pattern for the fan controller to enable temperature exposure via the API.
+```mermaid
+sequenceDiagram
+    participant Client
+    participant API as API v1
+    participant BP as Backplane
+    participant Board as BitaxeBoard
+    participant HT as HashThread
+    participant HW as Hardware
+
+    Client->>API: POST /reinitialize
+    API->>API: Check board in active OR failed list
+    API->>API: Reset health counters
+
+    Note over API,BP: via backplane command queue
+    API->>BP: BackplaneCommand::ReinitializeBoard
+
+    BP->>BP: Remove board from HashMap
+    BP->>Board: board.shutdown()
+
+    Note over Board,HT: via watch channel
+    Board->>HT: ThreadRemovalSignal::Shutdown
+    HT->>HT: Exit actor loop
+    HT->>HT: Drop serial ports (data_reader, data_writer)
+
+    Note over Board,HW: GPIO pin 0 LOW
+    Board->>HW: hold_in_reset()
+
+    Note over Board,HW: TPS546 voltage off
+    Board->>HW: set_vout(0.0)
+
+    Note over Board,HW: EMC2101 fan controller
+    Board->>HW: set_fan_speed(25%)
+
+    Board->>Board: Abort stats task
+    Board-->>BP: Ok(())
+
+    BP->>BP: Unregister voltage controller
+    BP->>BP: Unregister board from API
+
+    Note over BP: Releases control_channel serial port
+    BP->>BP: drop(board)
+
+    Note over BP,HW: Simulated USB reconnect [1]
+    BP->>BP: handle_usb_event(UsbDeviceConnected)
+
+    Note over BP,HW: Open serial ports
+    BP->>HW: Create new BitaxeBoard
+    HW-->>BP:
+
+    BP->>Board: board.initialize()
+    Board->>HW: hold_in_reset()
+    Board->>HW: init_fan_controller()
+    Board->>HW: init_power_controller()
+    Board->>HW: release_reset()
+    Board->>HW: chip_discovery()
+    Board-->>BP:
+
+    BP->>BP: Register board with API
+    BP->>BP: Register voltage controller
+
+    BP->>Board: board.create_hash_threads()
+    Note over Board,HT: Transfers data_reader/writer ownership
+    Board->>HT: Create new HashThread
+    Board-->>BP:
+
+    BP->>BP: Store board in HashMap
+    BP->>BP: Send threads to Scheduler
+
+    Note over BP,HW: 500ms timeout
+    BP->>HW: Read new voltage
+    HW-->>BP:
+
+    Note over API,BP: via oneshot channel
+    BP-->>API: ReinitializeResult
+
+    API-->>Client: 200 OK {"success": true, ...}
+```
+
+### 7.2. Sequence Diagram (Failed Board)
+
+Reinitialization of a **failed** board skips shutdown steps since the board never
+fully initialized.
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant API as API v1
+    participant BP as Backplane
+    participant Board as BitaxeBoard
+    participant HW as Hardware
+
+    Client->>API: POST /reinitialize
+    API->>API: Check board in active OR failed list
+    API->>API: Reset health counters
+
+    Note over API,BP: via backplane command queue
+    API->>BP: BackplaneCommand::ReinitializeBoard
+
+    BP->>BP: Remove from failed_board_devices
+    BP->>BP: Remove from API failed_boards list
+
+    Note over BP,HW: Retry initialization
+    BP->>BP: handle_usb_event(UsbDeviceConnected)
+
+    Note over BP,HW: Open serial ports (spawn_blocking)
+    BP->>HW: Create new BitaxeBoard
+    HW-->>BP:
+
+    BP->>Board: board.initialize()
+    Board->>HW: hold_in_reset()
+    Board->>HW: init_fan_controller()
+    Board->>HW: init_power_controller()
+    Board->>HW: release_reset()
+    Board->>HW: chip_discovery()
+    Board-->>BP:
+
+    alt Success
+        BP->>BP: Register board with API
+        BP->>BP: Store board in HashMap
+        BP-->>API: ReinitializeResult(success=true)
+        API-->>Client: 200 OK
+    else Failure
+        BP->>BP: Store in failed_board_devices again
+        BP->>BP: Register in failed_boards
+        BP-->>API: ReinitializeResult(success=false)
+        API-->>Client: 500 Error
+    end
+```
+
+* [1] Simulated USB reconnect: No physical USB disconnect occurs. The software invokes handle_usb_event(UsbDeviceConnected) to reuse the standard board initialization path. The prior drop(board) releases the serial port, allowing the "reconnected" board to reopen it.
+
+### 7.3. Key Components
+
+| Component | Location | Role |
+|-----------|----------|------|
+| API v1 | `api/v1.rs` | HTTP endpoint handler, validates request, sends command to backplane |
+| Backplane | `backplane.rs` | Orchestrates board lifecycle, owns board instances and failed_board_devices |
+| BitaxeBoard | `board/bitaxe.rs` | Board abstraction, controls peripherals via control channel |
+| HashThread | `asic/bm13xx/thread.rs` | ASIC communication actor, owns data serial ports |
+| Hardware | Physical | TPS546 (voltage), EMC2101 (fan), GPIO (reset), serial ports |
+
+### 7.4. Data Structures
+
+| Structure | Location | Purpose |
+|-----------|----------|---------|
+| `Backplane.boards` | backplane.rs | Active, successfully initialized boards |
+| `Backplane.board_devices` | backplane.rs | UsbDeviceInfo for active boards (for reinit) |
+| `Backplane.failed_board_devices` | backplane.rs | UsbDeviceInfo for failed boards (for reinit) |
+| `AppState.failed_boards` | api/v1.rs | Failed board status visible via REST API |
+| `AppState.board_init_timeout` | api/v1.rs | Timeout read from env at startup |
+
+### 7.5. Communication Channels
+
+| Channel Type | Purpose |
+|--------------|---------|
+| `mpsc` | API → Backplane commands (BackplaneCommand enum) |
+| `oneshot` | Backplane → API response (ReinitializeResult) |
+| `watch` | Board → HashThread shutdown signal (ThreadRemovalSignal) |
+| Serial (control) | Board → ESP32 → I2C peripherals |
+| Serial (data) | HashThread → ESP32 → BM1370 ASIC |
+
+### 7.6. Critical Timing
+
+The `drop(board)` call before `handle_usb_event` is essential for active board
+reinitialization. The old board holds the control channel serial port (`/dev/ttyACMx`).
+If not explicitly dropped before reprobing, the new board creation fails with
+"Device or resource busy" because the OS still sees the port as open.
+
+For failed boards, the initialization task is aborted and we wait 100ms after
+abort to ensure the OS releases serial port handles.

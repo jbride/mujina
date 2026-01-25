@@ -1,0 +1,650 @@
+= Mujina Testing Architecture
+:toc: left
+:toclevels: 3
+:sectnums:
+:icons: font
+:source-highlighter: rouge
+
+== Executive Summary
+
+The Mujina Bitcoin mining software codebase contains *196 total tests* organized across multiple testing paradigms with a strong focus on unit and integration testing. The test suite emphasizes protocol correctness and hardware compatibility through reference captures and property-based validation.
+
+.Test Distribution Overview
+[cols="2,1,3"]
+|===
+|Test Type |Count |Primary Focus
+
+|Unit Tests (`#[test]`)
+|171
+|Protocol validation, data types, utilities
+
+|Async Tests (`#[tokio::test]`)
+|25
+|Network I/O, pool communication
+
+|Serialized Tests (`#[serial]`)
+|2
+|Exclusive resource access
+
+|Parametrized Tests (`#[test_case]`)
+|4+
+|CRC validation with multiple inputs
+|===
+
+== Unit Tests
+
+=== Overview
+
+Unit tests form the backbone of the test suite with *171 tests across 27 files*. These tests validate core functionality without requiring external dependencies.
+
+=== Distribution by File
+
+.Top 10 Files by Test Count
+[cols="3,1,2"]
+|===
+|File |Tests |Testing Area
+
+|`src/asic/bm13xx/protocol.rs`
+|42
+|BM13xx chip protocol encoding/decoding
+
+|`src/peripheral/pmbus/pmbus_types.rs`
+|15
+|PMBus voltage/temperature conversions
+
+|`src/job_source/extranonce2.rs`
+|14
+|Stratum v1 extranonce2 generation
+
+|`src/stratum_v1/messages.rs`
+|11
+|Stratum v1 message parsing
+
+|`src/job_source/test_blocks.rs`
+|9
+|Bitcoin block and header validation
+
+|`src/types/difficulty.rs`
+|8
+|Difficulty calculations
+
+|`src/job_source/stratum_v1.rs`
+|8
+|Job source conversion
+
+|`src/asic/bm13xx/test_data.rs`
+|8
+|Hardware capture consistency
+
+|`src/peripheral/pmbus.rs`
+|7
+|PMBus command and voltage handling
+
+|`src/job_source/version.rs`
+|7
+|Bitcoin version field handling
+|===
+
+=== Testing Patterns
+
+==== Parametrized Tests
+
+The `test-case` crate (v3.3.1) enables data-driven testing for CRC validation.
+
+.Location
+`mujina-miner/src/asic/bm13xx/crc.rs`
+
+[source,rust]
+----
+#[test_case(&[0x55, 0xaa, 0x52, 0x05, 0x00, 0x00, 0x0a]; "read_register_0")]
+#[test_case(&[0x55, 0xaa, 0x51, 0x09, 0x00, 0x28, 0x11, 0x30, 0x02, 0x00, 0x03]; "set_baud")]
+fn calculate(frame: &[u8])
+----
+
+==== Protocol Reference Tests
+
+Wire format validation against hardware captures ensures protocol correctness.
+
+.Location
+`mujina-miner/src/asic/bm13xx/protocol.rs`
+
+.Key Tests
+* `test_full_mining_round_trip()` - Complete mining cycle with esp-miner capture
+* `test_job_full_encoding_matches_hardware_capture()` - JobFull frame validation
+* `test_nonce_response_decoding()` - Response frame parsing
+* Ticket mask, hashrate, and frequency calculation tests
+
+==== Data Type Tests
+
+[cols="2,3"]
+|===
+|Category |Coverage
+
+|Difficulty Calculations
+|8 tests validating difficulty conversions
+
+|Hash Rates
+|Gibihashes/s and Tebihashes/s conversions
+
+|Share Rates
+|Share rate calculations and formatting
+
+|Display Formatting
+|Precision and output format tests
+|===
+
+==== Bitcoin Integration Tests
+
+.Location
+`mujina-miner/src/job_source/test_blocks.rs`
+
+Tests validate against real block data from block 881,423:
+
+* Ground truth field values (version, previous hash, merkle root)
+* 80-byte header binary representation
+* Consistency checks between typed fields and wire format
+
+== Async/Integration Tests
+
+=== Overview
+
+*25 async tests across 4 files* validate network I/O and connection handling using Tokio's test runtime.
+
+.Async Test Distribution
+[cols="3,1,2"]
+|===
+|File |Tests |Description
+
+|`src/stratum_v1/client.rs`
+|12
+|Pool connection and protocol handling
+
+|`src/transport/serial.rs`
+|6
+|Serial port communication
+
+|`src/job_source/forced_rate.rs`
+|6
+|Job rate limiting
+
+|`src/stratum_v1/connection.rs`
+|1
+|Connection lifecycle
+|===
+
+=== Pool Integration Tests
+
+.Location
+`mujina-miner/src/stratum_v1/client.rs`
+
+These tests are marked `#[ignore]` as they require network access:
+
+* `test_integration_public_pool()` - Tests against public-pool.io
+* `test_integration_ckpool()` - Tests against solo.ckpool.org
+* `test_integration_ocean()` - Tests against mine.ocean.xyz
+* `test_pool_from_env()` - Custom pool via environment variables
+
+.Test Strategy
+[source,rust]
+----
+#[tokio::test]
+#[ignore]  // Requires network access
+async fn test_integration_public_pool()
+----
+
+.Protocol Validation Coverage
+. *Connection Phase*: TCP setup and client spawning
+. *Event Collection*: Validates subscription, job, and difficulty events
+. *Stability Check*: 5-second connection stability verification
+. *Protocol Validation*:
+** Extranonce1 not empty
+** Extranonce2 size validity
+** Job ID presence
+** Hash values proper format
+** Difficulty positivity
+
+=== Serial Transport Tests
+
+.Location
+`mujina-miner/src/transport/serial.rs`
+
+.Test Types
+* Baud rate configuration validation
+* Frame framing and codec tests
+* USB serial discovery (Linux-specific)
+* PTY-based serial communication tests
+
+TIP: Use the `skip-pty-tests` feature flag to skip PTY tests that may hang in CI environments.
+
+=== Job Rate Limiting Tests
+
+.Location
+`mujina-miner/src/job_source/forced_rate.rs`
+
+.Coverage
+* Rate limiter timing precision
+* Job emission at specified rates
+* Synchronization with external clock sources
+
+== Serialized Tests
+
+=== Overview
+
+*2 tests* require exclusive resource access using the `serial_test` crate (v3.3.1).
+
+.Location
+`mujina-miner/src/cpu_miner/config.rs`
+
+.Tests
+* `test_parse_config_with_default_miner_count()` - Config parsing with defaults
+* `test_parse_config_with_custom_miner_count()` - Config parsing with custom values
+
+[source,rust]
+----
+#[test]
+#[serial]
+fn test_parse_config_with_default_miner_count() {
+    // Test with exclusive resource access
+}
+----
+
+== Test Utilities and Fixtures
+
+=== Test Data Module
+
+.Location
+`mujina-miner/src/asic/bm13xx/test_data.rs`
+
+Central repository of known-good test data from real hardware captures.
+
+.Stratum JSON Fixtures
+[source,rust]
+----
+pub const MINING_NOTIFY: &str = r#"{ ... }"#;
+pub const MINING_SUBMIT: &str = r#"{ ... }"#;
+----
+
+.Hardware Wire Captures
+* `esp_miner_job::wire_tx::FRAME` - JobFull command frame (88 bytes)
+* `esp_miner_job::wire_rx::FRAME` - Nonce response frame
+
+.Parsed Constants
+* Job ID, nonces, timestamps, difficulty targets
+* Block hashes, merkle roots, version fields
+* Extracted from real Bitaxe Gamma mining session
+
+=== Bitcoin Block Test Data
+
+.Location
+`mujina-miner/src/job_source/test_blocks.rs`
+
+Block 881,423 from the 256 Foundation Telehash event (January 30, 2025) which raised 3.146 BTC for open-source mining projects.
+
+.Provides
+* Typed constants: `VERSION`, `PREV_BLOCKHASH`, `MERKLE_ROOT`, `TIME`, `BITS`, `NONCE`
+* 80-byte header wire format
+* `LazyLock<T>` for rust-bitcoin types (non-const constructors)
+
+=== Mock and Helper Tests
+
+.Location
+`mujina-miner/src/stratum_v1/client.rs`
+
+[source,rust]
+----
+fn test_client() -> (StratumV1Client, mpsc::Receiver<ClientEvent>) {
+    // Creates minimal client for testing notification handlers
+}
+----
+
+== Test Configuration
+
+=== Cargo.toml Settings
+
+.Workspace-level Dependencies
+[source,toml]
+----
+[workspace.dependencies]
+test-case = "3.3.1"      # Parametrized tests
+serial_test = "3.3.1"    # Serialized test execution
+----
+
+.Package-level Configuration
+[source,toml]
+----
+[features]
+default = []
+skip-pty-tests = []  # Skip PTY-based serial tests that may hang
+
+[dev-dependencies]
+serial_test = "3.3.1"
+test-case = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
+----
+
+=== Feature Flags
+
+.skip-pty-tests
+Disables PTY (pseudo-terminal) serial tests.
+
+* Use in CI/headless environments to prevent hanging tests
+* Configurable at compile time for environment-specific behavior
+
+=== Environment Variables
+
+.Pool Integration Tests
+[cols="2,3"]
+|===
+|Variable |Description
+
+|`MUJINA_POOL_URL`
+|Pool server address (required for env tests)
+
+|`MUJINA_POOL_USER`
+|Mining username/wallet (optional, defaults to test address)
+|===
+
+.Example Execution
+[source,bash]
+----
+MUJINA_POOL_URL="stratum+tcp://localhost:3333" \
+MUJINA_POOL_USER="bc1qce93hy5rhg02s6aeu7mfdvxg76x66pqqtrvzs3.my-worker" \
+cargo test --lib test_pool_from_env -- --ignored --nocapture
+----
+
+== CI/CD and Build System
+
+=== Justfile Commands
+
+.Location
+`justfile`
+
+[source,bash]
+----
+just test     # Run unit tests (no hardware required)
+just checks   # Run all checks: fmt, lint, test
+just lint     # cargo clippy --release -- -D warnings
+just fmt      # cargo fmt
+----
+
+=== Pre-commit Hooks
+
+.Location
+`.githooks/pre-commit`
+
+.Test-Related Actions
+. Format check (`cargo fmt --check`)
+. Whitespace validation
+. Prevents commits with failing tests
+
+.Stash Management
+* Stashes unstaged changes before format checking
+* Restores working directory after validation
+
+== Specialized Test Types
+
+=== Hardware Reference Tests
+
+Validate implementation against real hardware captures.
+
+.Example Tests
+* CRC validation against esp-miner captures
+* Wire frame encoding/decoding with Bitaxe Gamma logs
+* Mining round-trip: pool -> chip -> response -> hash validation
+
+.Data Source
+Real logs from Bitaxe Gamma mining sessions.
+
+=== Property-Based Validation
+
+While no explicit property-testing framework (proptest/quickcheck) is used, tests incorporate property-based patterns:
+
+.Frequency Calculation Tests
+* PLL frequency ramp generation (56.25 MHz to 525 MHz)
+* 76 frequency steps with validation of first/last values
+
+.Voltage Conversion Tests
+* Direct format, Linear11, Linear16 PMBus formats
+* Precision preservation (millivolt-level)
+* Ordering and comparability tests
+
+.CRC Validation
+* CRC5-USB for command frames
+* CRC16-CCITT-FALSE for job payloads
+* Validation against known good frames
+
+=== Ignored/Skipped Tests
+
+.Location
+`mujina-miner/src/stratum_v1/client.rs`
+
+*4 integration tests* marked with `#[ignore]` require:
+
+* Network connectivity
+* External pool availability
+* Longer execution time
+* Real-world conditions
+
+.Execution
+[source,bash]
+----
+cargo test -- --ignored --nocapture
+----
+
+== Build Requirements
+
+=== Supported Platforms
+
+.Primary: Linux (Debian/Ubuntu)
+* `libudev-dev` - USB device enumeration
+* `libssl-dev` - TLS/crypto support
+
+.Secondary: macOS
+* No IOKit implementation yet for USB discovery
+
+.Testing
+* Works on all platforms with CPU-only mode
+
+=== Test Execution Commands
+
+[source,bash]
+----
+# Standard test run
+cargo test
+
+# With logging enabled
+RUST_LOG=mujina_miner=debug cargo test
+
+# Specific test module
+cargo test --lib stratum_v1::client::
+
+# Integration tests only
+cargo test -- --ignored --nocapture
+----
+
+== Test Patterns and Best Practices
+
+=== Test Organization
+
+.Inline Tests
+Tests in same file as code under test using `#[cfg(test)]` module guards. Promotes test-driven design.
+
+.Test Data Separation
+Reference fixtures in dedicated modules:
+
+* `test_data.rs` for wire captures
+* `test_blocks.rs` for blockchain data
+* Avoids circular dependencies
+
+.Async Testing
+Tokio runtime integration with `#[tokio::test]` for async code and proper span/context management via tracing.
+
+=== Documentation in Tests
+
+* Test names describe intent (e.g., `test_full_mining_round_trip`)
+* Doc comments explain test strategy
+* Clear assertion messages with context
+
+=== Error Handling
+
+* Assertions include expected vs. actual values
+* Tolerances documented for floating-point tests
+* Helpful error messages for debugging
+
+== Test Coverage Analysis
+
+=== What Is Tested
+
+[cols="1,3"]
+|===
+|Area |Status
+
+|Protocol Encoding/Decoding
+|icon:check[] BM13xx, Stratum v1
+
+|Cryptographic Operations
+|icon:check[] CRC, hashing
+
+|Numeric Conversions
+|icon:check[] Difficulty, hashrate, voltage
+
+|Hardware Communication
+|icon:check[] Serial, USB
+
+|Network Protocol
+|icon:check[] Pool connectivity
+
+|Job Generation
+|icon:check[] Distribution and rate limiting
+
+|Bitcoin Block Validation
+|icon:check[] Header parsing and verification
+
+|Configuration Parsing
+|icon:check[] TOML and environment
+|===
+
+=== What Is Not Explicitly Tested
+
+[cols="1,3"]
+|===
+|Area |Notes
+
+|End-to-end Hardware Mining
+|Requires physical ASIC hardware
+
+|Performance Benchmarks
+|No `#[bench]` tests defined
+
+|Long-running Stress Tests
+|Not implemented
+
+|Cross-platform Hardware Variations
+|Limited to Linux currently
+
+|Actual ASIC Chip Communication
+|Requires Bitaxe hardware
+|===
+
+== Key Files Reference
+
+.Primary Test Files
+[cols="3,1,1,2"]
+|===
+|File |Type |Tests |Purpose
+
+|`asic/bm13xx/protocol.rs`
+|Unit
+|42
+|Chip protocol codec
+
+|`asic/bm13xx/crc.rs`
+|Unit
+|1
+|CRC validation
+
+|`stratum_v1/client.rs`
+|Async
+|12
+|Pool connection
+
+|`transport/serial.rs`
+|Async
+|6
+|Serial I/O
+
+|`peripheral/pmbus.rs`
+|Unit
+|7
+|Power management
+
+|`job_source/extranonce2.rs`
+|Unit
+|14
+|Nonce generation
+
+|`types/difficulty.rs`
+|Unit
+|8
+|Difficulty math
+
+|`asic/bm13xx/test_data.rs`
+|Fixture
+|8
+|Hardware captures
+
+|`job_source/test_blocks.rs`
+|Fixture
+|9
+|Block validation
+
+|`cpu_miner/config.rs`
+|Unit
+|2
+|Config parsing
+|===
+
+== Summary Statistics
+
+.Overall Test Metrics
+[cols="2,1"]
+|===
+|Metric |Value
+
+|Total Test Functions
+|196
+
+|Unit Tests (`#[test]`)
+|171
+
+|Async Tests (`#[tokio::test]`)
+|25
+
+|Serialized Tests (`#[serial]`)
+|2
+
+|Parametrized Tests
+|4+
+
+|Ignored Integration Tests
+|4
+
+|Files with Tests
+|27
+
+|Test Utility Modules
+|2
+|===
+
+.Testing Frameworks
+* Tokio (async runtime)
+* test-case (parametrized tests)
+* serial_test (serialized execution)
+
+.CI/CD Tools
+* justfile (task runner)
+* Pre-commit hooks (format validation)
+
+---
+
+_The test suite demonstrates a mature, well-organized approach to ensuring protocol correctness and hardware compatibility through a combination of unit tests, integration tests, and reference-based validation against real hardware captures._

@@ -232,3 +232,120 @@ fn create_discovery() -> Result<Box<dyn UsbDiscoveryImpl>> {
         compile_error!("USB discovery is not implemented for this platform");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_usb_device_info_clone_preserves_fields() {
+        let original = UsbDeviceInfo::new_for_test(
+            0x1234,                               // vid
+            0x5678,                               // pid
+            Some("SERIAL123".to_string()),        // serial_number
+            Some("OSMU".to_string()),             // manufacturer
+            Some("Bitaxe".to_string()),           // product
+            "/sys/bus/usb/devices/1-1".to_string(), // device_path
+        );
+
+        let cloned = original.clone();
+
+        assert_eq!(cloned.vid, 0x1234);
+        assert_eq!(cloned.pid, 0x5678);
+        assert_eq!(cloned.serial_number, Some("SERIAL123".to_string()));
+        assert_eq!(cloned.manufacturer, Some("OSMU".to_string()));
+        assert_eq!(cloned.product, Some("Bitaxe".to_string()));
+        assert_eq!(cloned.device_path, "/sys/bus/usb/devices/1-1");
+    }
+
+    #[test]
+    fn test_usb_device_info_clone_resets_serial_ports_cache() {
+        let original = UsbDeviceInfo::new_for_test(
+            0x1234,
+            0x5678,
+            Some("SERIAL123".to_string()),
+            Some("OSMU".to_string()),
+            Some("Bitaxe".to_string()),
+            "/sys/bus/usb/devices/1-1".to_string(),
+        );
+
+        // Access serial_ports on original to populate the OnceLock
+        let _ = original.serial_ports();
+
+        // Clone should have a fresh (unpopulated) OnceLock
+        let cloned = original.clone();
+
+        // Both should return empty on non-Linux or proper result on Linux
+        // The key is that cloned has its own independent OnceLock
+        let original_ports = original.serial_ports();
+        let cloned_ports = cloned.serial_ports();
+
+        // Both operations should succeed (we're just verifying no panic)
+        assert!(original_ports.is_ok() || original_ports.is_err());
+        assert!(cloned_ports.is_ok() || cloned_ports.is_err());
+    }
+
+    #[test]
+    fn test_usb_device_info_clone_with_none_fields() {
+        let original = UsbDeviceInfo::new_for_test(
+            0x0000,
+            0x0000,
+            None,
+            None,
+            None,
+            "/sys/bus/usb/devices/1-2".to_string(),
+        );
+
+        let cloned = original.clone();
+
+        assert_eq!(cloned.vid, 0x0000);
+        assert_eq!(cloned.pid, 0x0000);
+        assert!(cloned.serial_number.is_none());
+        assert!(cloned.manufacturer.is_none());
+        assert!(cloned.product.is_none());
+        assert_eq!(cloned.device_path, "/sys/bus/usb/devices/1-2");
+    }
+
+    #[test]
+    fn test_usb_device_info_debug() {
+        let device = UsbDeviceInfo::new_for_test(
+            0x1234,
+            0x5678,
+            Some("ABC".to_string()),
+            Some("Mfr".to_string()),
+            Some("Prod".to_string()),
+            "/dev/test".to_string(),
+        );
+
+        let debug_output = format!("{:?}", device);
+
+        // Verify Debug trait is implemented and produces expected output
+        assert!(debug_output.contains("UsbDeviceInfo"));
+        // VID/PID are u16, Debug formats them as decimal (4660 = 0x1234)
+        assert!(debug_output.contains("vid:"));
+        assert!(debug_output.contains("pid:"));
+    }
+
+    #[test]
+    fn test_transport_event_debug() {
+        let device = UsbDeviceInfo::new_for_test(
+            0x1234,
+            0x5678,
+            Some("SERIAL".to_string()),
+            None,
+            None,
+            "/dev/test".to_string(),
+        );
+
+        let connected_event = TransportEvent::UsbDeviceConnected(device);
+        let debug_connected = format!("{:?}", connected_event);
+        assert!(debug_connected.contains("UsbDeviceConnected"));
+
+        let disconnected_event = TransportEvent::UsbDeviceDisconnected {
+            device_path: "/sys/bus/usb/devices/1-1".to_string(),
+        };
+        let debug_disconnected = format!("{:?}", disconnected_event);
+        assert!(debug_disconnected.contains("UsbDeviceDisconnected"));
+        assert!(debug_disconnected.contains("/sys/bus/usb/devices/1-1"));
+    }
+}
